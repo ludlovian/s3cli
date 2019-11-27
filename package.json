@@ -1,0 +1,42 @@
+{
+  "name": "s3cli",
+  "version": "0.1.0",
+  "description": "Simple CLI for AWS S3",
+  "main": "dist/s3cli",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "format": "prettier-standard src/*.js",
+    "lint": "standard src/*.js | snazzy",
+    "build": "rollup -c rollup.config.js",
+    "postbuild": "chmod +x dist/s3cli",
+    "version": "npm run build && git add dist/s3cli"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ludlovian/s3cli.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ludlovian/s3cli/issues"
+  },
+  "homepage": "https://github.com/ludlovian/s3cli#readme",
+  "dependencies": {
+    "filescan": "github:ludlovian/filescan",
+    "jsdbd": "github:ludlovian/jsdbd",
+    "s3js": "github:ludlovian/s3js",
+    "sade": "^1.6.1"
+  },
+  "devDependencies": {
+    "esm": "^3.2.25",
+    "prettier-standard": "^15.0.1",
+    "rollup": "^1.27.5",
+    "rollup-plugin-cleanup": "^3.1.1",
+    "rollup-plugin-commonjs": "^10.1.0",
+    "rollup-plugin-json": "^4.0.0",
+    "rollup-plugin-node-resolve": "^5.2.0",
+    "rollup-plugin-terser": "^5.1.2",
+    "snazzy": "^8.0.0",
+    "standard": "^14.3.1"
+  }
+}
