@@ -374,7 +374,12 @@ function time (n) {
   const sc = (n % 60).toString().padStart(2, '0');
   return `${mn}:${sc}`
 }
-const suffixes = [['M', 1024 * 1024], ['K', 1024], ['', 1]];
+const suffixes = [
+  ['G', 1024 * 1024 * 1024],
+  ['M', 1024 * 1024],
+  ['K', 1024],
+  ['', 1]
+];
 function size (n) {
   for (const [suffix, factor] of suffixes) {
     if (n >= factor) {
@@ -808,21 +813,29 @@ log.status = status;
 log.log = log;
 
 async function ls (url, options) {
-  const { long, directory } = options;
+  const { long, directory, human, total } = options;
   if (directory && !url.endsWith('/')) url += '/';
   const opts = {
     Delimiter: directory ? '/' : undefined
   };
+  let numFiles = 0;
+  let totalBytes = 0;
   for await (const data of dist_4(url, opts)) {
     const { Key, Prefix, ETag = '', Size } = data;
     if (Key && Key.endsWith('/')) continue
-    log(
-      [
-        long ? ETag.replace(/"/g, '').padEnd(33) : '',
-        long ? `${comma(Size).padStart(13)}  ` : '',
-        Prefix || Key
-      ].join('')
-    );
+    numFiles++;
+    totalBytes += Size;
+    const line = [Prefix || Key];
+    if (long) {
+      const md5 = ETag.replace(/"/g, '');
+      const filesize = human ? size(Size) : Size.toString();
+      line.splice(0, 0, md5.padEnd(32), filesize.padStart(10));
+    }
+    log(line.join(' '));
+  }
+  if (total) {
+    const s = human ? `${size(totalBytes)}B` : `${comma(totalBytes)} bytes`;
+    log(`\n${s} in ${comma(numFiles)} file(s).`);
   }
 }
 
@@ -1300,6 +1313,8 @@ prog.version(version);
 prog
   .command('ls <s3url>', 'list the objects in a bucket')
   .option('-l, --long', 'show more detail')
+  .option('-t, --total', 'include a total in long listing')
+  .option('-H, --human', 'show human sizes in long listing')
   .option('-d, --directory', 'list directories without recursing')
   .action(wrap(ls));
 prog

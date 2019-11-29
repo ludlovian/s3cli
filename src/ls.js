@@ -2,10 +2,10 @@
 
 import { scan } from 's3js'
 import log from './log'
-import { comma } from './util'
+import { comma, size } from './util'
 
 export default async function ls (url, options) {
-  const { long, directory } = options
+  const { long, directory, human, total } = options
 
   if (directory && !url.endsWith('/')) url += '/'
 
@@ -13,15 +13,26 @@ export default async function ls (url, options) {
     Delimiter: directory ? '/' : undefined
   }
 
+  let numFiles = 0
+  let totalBytes = 0
+
   for await (const data of scan(url, opts)) {
     const { Key, Prefix, ETag = '', Size } = data
     if (Key && Key.endsWith('/')) continue
-    log(
-      [
-        long ? ETag.replace(/"/g, '').padEnd(33) : '',
-        long ? `${comma(Size).padStart(13)}  ` : '',
-        Prefix || Key
-      ].join('')
-    )
+
+    numFiles++
+    totalBytes += Size
+
+    const line = [Prefix || Key]
+    if (long) {
+      const md5 = ETag.replace(/"/g, '')
+      const filesize = human ? size(Size) : Size.toString()
+      line.splice(0, 0, md5.padEnd(32), filesize.padStart(10))
+    }
+    log(line.join(' '))
+  }
+  if (total) {
+    const s = human ? `${size(totalBytes)}B` : `${comma(totalBytes)} bytes`
+    log(`\n${s} in ${comma(numFiles)} file(s).`)
   }
 }

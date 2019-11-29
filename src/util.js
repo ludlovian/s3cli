@@ -57,7 +57,12 @@ export function time (n) {
   return `${mn}:${sc}`
 }
 
-const suffixes = [['M', 1024 * 1024], ['K', 1024], ['', 1]]
+const suffixes = [
+  ['G', 1024 * 1024 * 1024],
+  ['M', 1024 * 1024],
+  ['K', 1024],
+  ['', 1]
+]
 
 export function size (n) {
   for (const [suffix, factor] of suffixes) {

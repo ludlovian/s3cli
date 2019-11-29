@@ -17,6 +17,8 @@ prog.version(version)
 prog
   .command('ls <s3url>', 'list the objects in a bucket')
   .option('-l, --long', 'show more detail')
+  .option('-t, --total', 'include a total in long listing')
+  .option('-H, --human', 'show human sizes in long listing')
   .option('-d, --directory', 'list directories without recursing')
   .action(wrap(ls))
 
