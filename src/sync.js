@@ -1,6 +1,7 @@
-'use strict'
-
+import fs from 'fs'
 import { join } from 'path'
+
+import { deleteObject } from 's3js'
 
 import Local from './local'
 import Remote from './remote'
@@ -44,7 +45,7 @@ export default async function sync (
     } else if (local) {
       if (downsync) {
         if (deleteExtra) {
-          log(`${path} - local delete`)
+          await deleteLocal(local)
         }
       } else {
         await uploadFile(local)
@@ -56,14 +57,14 @@ export default async function sync (
         await downloadFile(remote)
       } else {
         if (deleteExtra) {
-          log(`${path} - remote delete`)
+          await deleteRemote(remote)
         }
       }
     }
   }
   log(`${comma(fileCount)} files processed.`)
 
-  function uploadFile ({ path, fullpath }) {
+  async function uploadFile ({ path, fullpath }) {
     if (dryRun) return log(`${path} - upload (dry run)`)
 
     return retry(() =>
@@ -74,7 +75,7 @@ export default async function sync (
     )
   }
 
-  function downloadFile ({ path, url }) {
+  async function downloadFile ({ path, url }) {
     if (dryRun) return log(`${path} - download (dry run)`)
 
     return retry(() =>
@@ -83,6 +84,20 @@ export default async function sync (
         progress: true
       })
     )
+  }
+
+  async function deleteLocal ({ path }) {
+    if (dryRun) return log(`${path} - delete (dry run)`)
+
+    return fs.promises.unlink(join(lRoot, path))
+  }
+
+  async function deleteRemote ({ path }) {
+    if (dryRun) return log(`${path} - delete (dry run)`)
+    const url = `${rRoot}/${path}`
+    log.status(`${url} - deleting`)
+    await deleteObject(url)
+    log(`${url} - deleted`)
   }
 }
 
