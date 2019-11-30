@@ -389,7 +389,7 @@ function size (n) {
   return '0'
 }
 
-var version = "1.0.0";
+var version = "1.1.0";
 
 function unwrapExports (x) {
 	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
@@ -1267,7 +1267,7 @@ async function sync (
     } else if (local) {
       if (downsync) {
         if (deleteExtra) {
-          log(`${path} - local delete`);
+          await deleteLocal(local);
         }
       } else {
         await uploadFile(local);
@@ -1277,13 +1277,13 @@ async function sync (
         await downloadFile(remote);
       } else {
         if (deleteExtra) {
-          log(`${path} - remote delete`);
+          await deleteRemote(remote);
         }
       }
     }
   }
   log(`${comma(fileCount)} files processed.`);
-  function uploadFile ({ path, fullpath }) {
+  async function uploadFile ({ path, fullpath }) {
     if (dryRun) return log(`${path} - upload (dry run)`)
     return retry(() =>
       upload(fullpath, `${rRoot}/${path}`, {
@@ -1292,7 +1292,7 @@ async function sync (
       })
     )
   }
-  function downloadFile ({ path: path$1, url }) {
+  async function downloadFile ({ path: path$1, url }) {
     if (dryRun) return log(`${path$1} - download (dry run)`)
     return retry(() =>
       download(url, path.join(lRoot, path$1), {
@@ -1300,6 +1300,17 @@ async function sync (
         progress: true
       })
     )
+  }
+  async function deleteLocal ({ path: path$1 }) {
+    if (dryRun) return log(`${path$1} - delete (dry run)`)
+    return fs.promises.unlink(path.join(lRoot, path$1))
+  }
+  async function deleteRemote ({ path }) {
+    if (dryRun) return log(`${path} - delete (dry run)`)
+    const url = `${rRoot}/${path}`;
+    log.status(`${url} - deleting`);
+    await dist_1(url);
+    log(`${url} - deleted`);
   }
 }
 function getFilter ({ filter }) {
