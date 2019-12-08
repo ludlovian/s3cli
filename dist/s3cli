@@ -749,6 +749,94 @@ var dist_4 = dist$3.scan;
 var dist_5 = dist$3.stat;
 var dist_6 = dist$3.upload;
 
+const { FORCE_COLOR, NODE_DISABLE_COLORS, TERM } = process.env;
+const $ = {
+	enabled: !NODE_DISABLE_COLORS && TERM !== 'dumb' && FORCE_COLOR !== '0',
+	reset: init(0, 0),
+	bold: init(1, 22),
+	dim: init(2, 22),
+	italic: init(3, 23),
+	underline: init(4, 24),
+	inverse: init(7, 27),
+	hidden: init(8, 28),
+	strikethrough: init(9, 29),
+	black: init(30, 39),
+	red: init(31, 39),
+	green: init(32, 39),
+	yellow: init(33, 39),
+	blue: init(34, 39),
+	magenta: init(35, 39),
+	cyan: init(36, 39),
+	white: init(37, 39),
+	gray: init(90, 39),
+	grey: init(90, 39),
+	bgBlack: init(40, 49),
+	bgRed: init(41, 49),
+	bgGreen: init(42, 49),
+	bgYellow: init(43, 49),
+	bgBlue: init(44, 49),
+	bgMagenta: init(45, 49),
+	bgCyan: init(46, 49),
+	bgWhite: init(47, 49)
+};
+function run(arr, str) {
+	let i=0, tmp, beg='', end='';
+	for (; i < arr.length; i++) {
+		tmp = arr[i];
+		beg += tmp.open;
+		end += tmp.close;
+		if (str.includes(tmp.close)) {
+			str = str.replace(tmp.rgx, tmp.close + tmp.open);
+		}
+	}
+	return beg + str + end;
+}
+function chain(has, keys) {
+	let ctx = { has, keys };
+	ctx.reset = $.reset.bind(ctx);
+	ctx.bold = $.bold.bind(ctx);
+	ctx.dim = $.dim.bind(ctx);
+	ctx.italic = $.italic.bind(ctx);
+	ctx.underline = $.underline.bind(ctx);
+	ctx.inverse = $.inverse.bind(ctx);
+	ctx.hidden = $.hidden.bind(ctx);
+	ctx.strikethrough = $.strikethrough.bind(ctx);
+	ctx.black = $.black.bind(ctx);
+	ctx.red = $.red.bind(ctx);
+	ctx.green = $.green.bind(ctx);
+	ctx.yellow = $.yellow.bind(ctx);
+	ctx.blue = $.blue.bind(ctx);
+	ctx.magenta = $.magenta.bind(ctx);
+	ctx.cyan = $.cyan.bind(ctx);
+	ctx.white = $.white.bind(ctx);
+	ctx.gray = $.gray.bind(ctx);
+	ctx.grey = $.grey.bind(ctx);
+	ctx.bgBlack = $.bgBlack.bind(ctx);
+	ctx.bgRed = $.bgRed.bind(ctx);
+	ctx.bgGreen = $.bgGreen.bind(ctx);
+	ctx.bgYellow = $.bgYellow.bind(ctx);
+	ctx.bgBlue = $.bgBlue.bind(ctx);
+	ctx.bgMagenta = $.bgMagenta.bind(ctx);
+	ctx.bgCyan = $.bgCyan.bind(ctx);
+	ctx.bgWhite = $.bgWhite.bind(ctx);
+	return ctx;
+}
+function init(open, close) {
+	let blk = {
+		open: `\x1b[${open}m`,
+		close: `\x1b[${close}m`,
+		rgx: new RegExp(`\\x1b\\[${close}m`, 'g')
+	};
+	return function (txt) {
+		if (this !== void 0 && this.has !== void 0) {
+			this.has.includes(open) || (this.has.push(open),this.keys.push(blk));
+			return txt === void 0 ? this : $.enabled ? run(this.keys, txt+'') : txt+'';
+		}
+		return txt === void 0 ? chain([open], [blk]) : $.enabled ? run([blk], txt+'') : txt+'';
+	};
+}
+var kleur = $;
+
 var s = 1000;
 var m = s * 60;
 var h = m * 60;
@@ -924,6 +1012,7 @@ log.status = status;
 log.log = log;
 
 const reporter = new EventEmitter();
+const { green } = kleur;
 function report (msg, payload) {
   reporter.emit(msg, payload);
 }
@@ -987,7 +1076,14 @@ reporter
     console.error(
       `\nError occured: ${err.message}\nWaiting ${ms(delay)} to retry...`
     );
-  });
+  })
+  .on('stat.start', url => log(url + '\n'))
+  .on('stat.details', ({ key, value, width }) => log(
+    [
+      green(`${key}:`.padEnd(width + 2)),
+      value instanceof Date ? fmtDate(value) : value
+    ].join('')
+  ));
 function fmtDuration (ms) {
   const secs = Math.round(ms / 1e3);
   const mn = Math.floor(secs / 60)
@@ -1531,6 +1627,25 @@ function getFilter ({ filter }) {
   return x => rgx.test(x)
 }
 
+async function stat (url) {
+  const data = await dist_5(url);
+  const results = [];
+  for (let [k, v] of Object.entries(data)) {
+    k = k.charAt(0).toLowerCase() + k.slice(1);
+    if (k === 'metadata') continue
+    if (k.endsWith('time')) v = new Date(v);
+    if (k === 'mode') v = '0o' + v.toString(8);
+    results.push([k, v]);
+  }
+  results.sort((a, b) => (a[0] < b[b] ? -1 : a[0] > b[0] ? 1 : 0));
+  const width = Math.max(...results.map(x => x[0].length));
+  report('stat.start', url);
+  for (const [key, value] of results) {
+    report('stat.details', { key, value, width });
+  }
+  report('stat.done', url);
+}
+
 const prog = lib$1('s3cli');
 prog.version(version);
 prog
@@ -1559,6 +1674,7 @@ prog
   .option('-d, --delete', 'delete extra files on the destination')
   .option('-D, --download', 'sync from S3 down to local')
   .action(wrap(sync));
+prog.command('stat <s3url>', 'show details about a file').action(wrap(stat));
 prog.parse(process.argv, {
   alias: { n: ['dryRun', 'dry-run'] }
 });

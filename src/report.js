@@ -1,11 +1,13 @@
 import EventEmitter from 'events'
 
+import kleur from 'kleur'
 import ms from 'ms'
 import tinydate from 'tinydate'
 
 import log from './log'
 
 const reporter = new EventEmitter()
+const { green } = kleur
 
 export default function report (msg, payload) {
   reporter.emit(msg, payload)
@@ -72,6 +74,13 @@ reporter
       `\nError occured: ${err.message}\nWaiting ${ms(delay)} to retry...`
     )
   })
+  .on('stat.start', url => log(url + '\n'))
+  .on('stat.details', ({ key, value, width }) => log(
+    [
+      green(`${key}:`.padEnd(width + 2)),
+      value instanceof Date ? fmtDate(value) : value
+    ].join('')
+  ))
 
 function fmtDuration (ms) {
   const secs = Math.round(ms / 1e3)

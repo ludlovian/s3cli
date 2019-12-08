@@ -9,6 +9,7 @@ import ls from './ls'
 import upload from './upload'
 import download from './download'
 import sync from './sync'
+import stat from './stat'
 
 const prog = sade('s3cli')
 
@@ -43,6 +44,8 @@ prog
   .option('-d, --delete', 'delete extra files on the destination')
   .option('-D, --download', 'sync from S3 down to local')
   .action(wrap(sync))
+
+prog.command('stat <s3url>', 'show details about a file').action(wrap(stat))
 
 prog.parse(process.argv, {
   alias: { n: ['dryRun', 'dry-run'] }
