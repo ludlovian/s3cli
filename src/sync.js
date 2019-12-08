@@ -2,14 +2,14 @@ import fs from 'fs'
 import { join } from 'path'
 
 import { deleteObject } from 's3js'
+import retry from 'retry'
 
 import Local from './local'
 import Remote from './remote'
-import log from './log'
 import match from './match'
-import { comma, retry } from './util'
 import upload from './upload'
 import download from './download'
+import report from './report'
 
 export default async function sync (
   lRoot,
@@ -19,7 +19,7 @@ export default async function sync (
   lRoot = lRoot.replace(/\/$/, '')
   rRoot = rRoot.replace(/\/$/, '')
 
-  log.status('Scanning files')
+  report('sync.start')
 
   const filter = getFilter(options)
   const lFiles = Local.scan(lRoot, filter)
@@ -29,9 +29,9 @@ export default async function sync (
   for await (const [local, remote] of match('path', lFiles, rFiles)) {
     fileCount++
     const path = local ? local.path : remote.path
-    log.status(path)
+    report('sync.file.start', path)
     if (local) {
-      local.on('hashing', () => log.status(`${local.path} - hashing`))
+      local.on('hashing', () => report('sync.file.hashing', path))
       await local.getHash()
     }
     if (local && remote) {
@@ -62,42 +62,66 @@ export default async function sync (
       }
     }
   }
-  log(`${comma(fileCount)} files processed.`)
+  report('sync.done', { count: fileCount })
 
   async function uploadFile ({ path, fullpath }) {
-    if (dryRun) return log(`${path} - upload (dry run)`)
+    if (dryRun) {
+      report('sync.file.dryrun', { path, action: 'upload' })
+      return
+    }
 
-    return retry(() =>
-      upload(fullpath, `${rRoot}/${path}`, {
-        ...options,
-        progress: true
-      })
+    return retry(
+      () =>
+        upload(fullpath, `${rRoot}/${path}`, {
+          ...options,
+          progress: true
+        }),
+      {
+        retries: 5,
+        delay: 5000,
+        onRetry: data => report('retry', data)
+      }
     )
   }
 
   async function downloadFile ({ path, url }) {
-    if (dryRun) return log(`${path} - download (dry run)`)
+    if (dryRun) {
+      report('sync.file.dryrun', { path, action: 'download' })
+      return
+    }
 
-    return retry(() =>
-      download(url, join(lRoot, path), {
-        ...options,
-        progress: true
-      })
+    return retry(
+      () =>
+        download(url, join(lRoot, path), {
+          ...options,
+          progress: true
+        }),
+      {
+        retries: 5,
+        delay: 5000,
+        onRetry: data => report('retry', data)
+      }
     )
   }
 
   async function deleteLocal ({ path }) {
-    if (dryRun) return log(`${path} - delete (dry run)`)
+    if (dryRun) {
+      report('sync.file.dryrun', { path, action: 'delete' })
+      return
+    }
 
     return fs.promises.unlink(join(lRoot, path))
   }
 
   async function deleteRemote ({ path }) {
-    if (dryRun) return log(`${path} - delete (dry run)`)
+    if (dryRun) {
+      report('sync.file.dryrun', { path, action: 'delete' })
+      return
+    }
     const url = `${rRoot}/${path}`
-    log.status(`${url} - deleting`)
+    report('delete.file.start', url)
     await deleteObject(url)
-    log(`${url} - deleted`)
+    report('delete.file.done', url)
   }
 }
 

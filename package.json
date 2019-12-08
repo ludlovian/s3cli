@@ -24,8 +24,12 @@
   "dependencies": {
     "filescan": "github:ludlovian/filescan",
     "jsdbd": "github:ludlovian/jsdbd",
+    "ms": "^2.1.2",
+    "retry": "github:ludlovian/retry",
     "s3js": "github:ludlovian/s3js",
-    "sade": "^1.6.1"
+    "sade": "^1.6.1",
+    "speedo": "github:ludlovian/speedo",
+    "tinydate": "^1.2.0"
   },
   "devDependencies": {
     "esm": "^3.2.25",

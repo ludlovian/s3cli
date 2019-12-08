@@ -43,32 +43,6 @@ export function wrap (fn) {
     })
 }
 
-export function comma (n) {
-  if (typeof n !== 'number') return ''
-  return n.toLocaleString()
-}
-
-export function time (n) {
-  n = Math.round(n)
-  const mn = Math.floor(n / 60)
-    .toString()
-    .padStart(2, '0')
-  const sc = (n % 60).toString().padStart(2, '0')
-  return `${mn}:${sc}`
-}
-
-const suffixes = [
-  ['G', 1024 * 1024 * 1024],
-  ['M', 1024 * 1024],
-  ['K', 1024],
-  ['', 1]
-]
-
-export function size (n) {
-  for (const [suffix, factor] of suffixes) {
-    if (n >= factor) {
-      return (n / factor).toFixed(1) + suffix
-    }
-  }
-  return '0'
-}
+export const time = () => {}
+export const size = () => {}
+export const comma = () => {}

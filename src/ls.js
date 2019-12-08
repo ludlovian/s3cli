@@ -1,38 +1,31 @@
-'use strict'
-
 import { scan } from 's3js'
-import log from './log'
-import { comma, size } from './util'
+
+import report from './report'
 
 export default async function ls (url, options) {
-  const { long, directory, human, total } = options
-
+  const { directory } = options
   if (directory && !url.endsWith('/')) url += '/'
 
-  const opts = {
+  let totalCount = 0
+  let totalSize = 0
+
+  const fileStream = scan(url, {
     Delimiter: directory ? '/' : undefined
-  }
+  })
 
-  let numFiles = 0
-  let totalBytes = 0
-
-  for await (const data of scan(url, opts)) {
-    const { Key, Prefix, ETag = '', Size } = data
+  for await (const { Key, Prefix, ETag, Size, LastModified } of fileStream) {
     if (Key && Key.endsWith('/')) continue
 
-    numFiles++
-    totalBytes += Size
+    totalCount++
+    totalSize += Size || 0
 
-    const line = [Prefix || Key]
-    if (long) {
-      const md5 = ETag.replace(/"/g, '')
-      const filesize = human ? size(Size) : Size.toString()
-      line.splice(0, 0, md5.padEnd(32), filesize.padStart(10))
-    }
-    log(line.join(' '))
+    report('list.file', {
+      ...options,
+      key: Prefix || Key,
+      md5: ETag ? ETag.replace(/"/g, '') : undefined,
+      mtime: LastModified,
+      size: Size
+    })
   }
-  if (total) {
-    const s = human ? `${size(totalBytes)}B` : `${comma(totalBytes)} bytes`
-    log(`\n${s} in ${comma(numFiles)} file(s).`)
-  }
+  report('list.file.totals', { ...options, totalSize, totalCount })
 }

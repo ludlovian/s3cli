@@ -323,28 +323,6 @@ class Sade {
 }
 var lib$1 = (str, isOne) => new Sade(str, isOne);
 
-async function retry (fn, { count = 5, backoff = 1 } = {}) {
-  let attempt = 1;
-  while (true) {
-    try {
-      return fn()
-    } catch (err) {
-      if (attempt++ > count) throw err
-      console.error(
-        [
-          '\n',
-          err.message,
-          `Waiting ${backoff}s before #${attempt} of ${count} ...`
-        ].join('')
-      );
-      await delay(backoff * 1e3);
-      backoff = backoff * 2;
-    }
-  }
-}
-function delay (ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
 const once = fn => {
   let called = false;
   let value;
@@ -361,32 +339,6 @@ function wrap (fn) {
       console.error(err);
       process.exit(1);
     })
-}
-function comma (n) {
-  if (typeof n !== 'number') return ''
-  return n.toLocaleString()
-}
-function time (n) {
-  n = Math.round(n);
-  const mn = Math.floor(n / 60)
-    .toString()
-    .padStart(2, '0');
-  const sc = (n % 60).toString().padStart(2, '0');
-  return `${mn}:${sc}`
-}
-const suffixes = [
-  ['G', 1024 * 1024 * 1024],
-  ['M', 1024 * 1024],
-  ['K', 1024],
-  ['', 1]
-];
-function size (n) {
-  for (const [suffix, factor] of suffixes) {
-    if (n >= factor) {
-      return (n / factor).toFixed(1) + suffix
-    }
-  }
-  return '0'
 }
 
 var version = "1.1.1";
@@ -797,6 +749,159 @@ var dist_4 = dist$3.scan;
 var dist_5 = dist$3.stat;
 var dist_6 = dist$3.upload;
 
+var s = 1000;
+var m = s * 60;
+var h = m * 60;
+var d = h * 24;
+var w = d * 7;
+var y = d * 365.25;
+var ms = function(val, options) {
+  options = options || {};
+  var type = typeof val;
+  if (type === 'string' && val.length > 0) {
+    return parse$1(val);
+  } else if (type === 'number' && isFinite(val)) {
+    return options.long ? fmtLong(val) : fmtShort(val);
+  }
+  throw new Error(
+    'val is not a non-empty string or a valid number. val=' +
+      JSON.stringify(val)
+  );
+};
+function parse$1(str) {
+  str = String(str);
+  if (str.length > 100) {
+    return;
+  }
+  var match = /^(-?(?:\d+)?\.?\d+) *(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)?$/i.exec(
+    str
+  );
+  if (!match) {
+    return;
+  }
+  var n = parseFloat(match[1]);
+  var type = (match[2] || 'ms').toLowerCase();
+  switch (type) {
+    case 'years':
+    case 'year':
+    case 'yrs':
+    case 'yr':
+    case 'y':
+      return n * y;
+    case 'weeks':
+    case 'week':
+    case 'w':
+      return n * w;
+    case 'days':
+    case 'day':
+    case 'd':
+      return n * d;
+    case 'hours':
+    case 'hour':
+    case 'hrs':
+    case 'hr':
+    case 'h':
+      return n * h;
+    case 'minutes':
+    case 'minute':
+    case 'mins':
+    case 'min':
+    case 'm':
+      return n * m;
+    case 'seconds':
+    case 'second':
+    case 'secs':
+    case 'sec':
+    case 's':
+      return n * s;
+    case 'milliseconds':
+    case 'millisecond':
+    case 'msecs':
+    case 'msec':
+    case 'ms':
+      return n;
+    default:
+      return undefined;
+  }
+}
+function fmtShort(ms) {
+  var msAbs = Math.abs(ms);
+  if (msAbs >= d) {
+    return Math.round(ms / d) + 'd';
+  }
+  if (msAbs >= h) {
+    return Math.round(ms / h) + 'h';
+  }
+  if (msAbs >= m) {
+    return Math.round(ms / m) + 'm';
+  }
+  if (msAbs >= s) {
+    return Math.round(ms / s) + 's';
+  }
+  return ms + 'ms';
+}
+function fmtLong(ms) {
+  var msAbs = Math.abs(ms);
+  if (msAbs >= d) {
+    return plural(ms, msAbs, d, 'day');
+  }
+  if (msAbs >= h) {
+    return plural(ms, msAbs, h, 'hour');
+  }
+  if (msAbs >= m) {
+    return plural(ms, msAbs, m, 'minute');
+  }
+  if (msAbs >= s) {
+    return plural(ms, msAbs, s, 'second');
+  }
+  return ms + ' ms';
+}
+function plural(ms, msAbs, n, name) {
+  var isPlural = msAbs >= n * 1.5;
+  return Math.round(ms / n) + ' ' + name + (isPlural ? 's' : '');
+}
+
+var RGX = /([^{]*?)\w(?=\})/g;
+
+var MAP = {
+	YYYY: 'getFullYear',
+	YY: 'getYear',
+	MM: function (d) {
+		return d.getMonth() + 1;
+	},
+	DD: 'getDate',
+	HH: 'getHours',
+	mm: 'getMinutes',
+	ss: 'getSeconds',
+	fff: 'getMilliseconds'
+};
+
+function tinydate (str, custom) {
+	var parts=[], offset=0;
+
+	str.replace(RGX, function (key, _, idx) {
+		// save preceding string
+		parts.push(str.substring(offset, idx - 1));
+		offset = idx += key.length + 1;
+		// save function
+		parts.push(custom && custom[key] || function (d) {
+			return ('00' + (typeof MAP[key] === 'string' ? d[MAP[key]]() : MAP[key](d))).slice(-key.length);
+		});
+	});
+
+	if (offset !== str.length) {
+		parts.push(str.substring(offset));
+	}
+
+	return function (arg) {
+		var out='', i=0, d=arg||new Date();
+		for (; i<parts.length; i++) {
+			out += (typeof parts[i]==='string') ? parts[i] : parts[i](d);
+		}
+		return out;
+	};
+}
+
 const CSI = '\u001B[';
 const CR = '\r';
 const EOL = `${CSI}0K`;
@@ -818,66 +923,163 @@ function status (string) {
 log.status = status;
 log.log = log;
 
-async function ls (url, options) {
-  const { long, directory, human, total } = options;
-  if (directory && !url.endsWith('/')) url += '/';
-  const opts = {
-    Delimiter: directory ? '/' : undefined
-  };
-  let numFiles = 0;
-  let totalBytes = 0;
-  for await (const data of dist_4(url, opts)) {
-    const { Key, Prefix, ETag = '', Size } = data;
-    if (Key && Key.endsWith('/')) continue
-    numFiles++;
-    totalBytes += Size;
-    const line = [Prefix || Key];
+const reporter = new EventEmitter();
+function report (msg, payload) {
+  reporter.emit(msg, payload);
+}
+reporter
+  .on('list.file', ({ key, md5, mtime, size, long, human }) => {
     if (long) {
-      const md5 = ETag.replace(/"/g, '');
-      const filesize = human ? size(Size) : Size.toString();
-      line.splice(0, 0, md5.padEnd(32), filesize.padStart(10));
+      log(
+        [
+          (md5 || '').padEnd(32),
+          (human ? fmtSize(size) : size.toString()).padStart(9),
+          (mtime ? fmtDate(mtime) : '').padEnd(17),
+          key
+        ].join('  ')
+      );
+    } else {
+      log(key);
     }
-    log(line.join(' '));
+  })
+  .on('list.file.totals', ({ totalSize, totalCount, total, human }) => {
+    if (!total) return
+    const s = human ? `${fmtSize(totalSize)}B` : `${comma(totalSize)} bytes`;
+    log(`\n${s} in ${comma(totalCount)} file${totalCount > 1 ? 's' : ''}`);
+  })
+  .on('file.transfer.start', url => log(url))
+  .on(
+    'file.transfer.update',
+    ({ bytes, percent, total, taken, eta, speed }) => {
+      log.status(
+        [
+          comma(bytes).padStart(1 + comma(total).length),
+          `${percent.toString().padStart(3)}%`,
+          `time ${fmtDuration(taken)}`,
+          `eta ${fmtDuration(eta)}`,
+          `rate ${fmtSize(speed)}B/s`
+        ].join(' ')
+      );
+    }
+  )
+  .on('file.transfer.done', ({ bytes, taken, speed, direction }) => {
+    log(
+      [
+        ` ${comma(bytes)} bytes`,
+        direction,
+        `in ${fmtDuration(taken)}`,
+        `at ${fmtSize(bytes / taken)}B/s`
+      ].join(' ')
+    );
+  })
+  .on('sync.start', () => log.status('Scanning files'))
+  .on('sync.file.start', path => log.status(path))
+  .on('sync.file.hashing', path => log.status(`${path} - hashing`))
+  .on('sync.file.dryrun', ({ path, action }) =>
+    log(`${path} - ${action} (dry run)`)
+  )
+  .on('sync.done', ({ count }) =>
+    log(`${comma(count)} file${count > 1 ? 's' : ''} processed.`)
+  )
+  .on('delete.file.start', path => log.status(`${path} - deleting `))
+  .on('delete.file.done', path => log(`${path} - deleted`))
+  .on('retry', ({ delay, err }) => {
+    console.error(
+      `\nError occured: ${err.message}\nWaiting ${ms(delay)} to retry...`
+    );
+  });
+function fmtDuration (ms) {
+  const secs = Math.round(ms / 1e3);
+  const mn = Math.floor(secs / 60)
+    .toString()
+    .padStart(2, '0');
+  const sc = (secs % 60).toString().padStart(2, '0');
+  return `${mn}:${sc}`
+}
+function fmtSize (n) {
+  const suffixes = [
+    ['G', 1024 * 1024 * 1024],
+    ['M', 1024 * 1024],
+    ['K', 1024],
+    ['', 1]
+  ];
+  for (const [suffix, factor] of suffixes) {
+    if (n >= factor) {
+      return (n / factor).toFixed(1) + suffix
+    }
   }
-  if (total) {
-    const s = human ? `${size(totalBytes)}B` : `${comma(totalBytes)} bytes`;
-    log(`\n${s} in ${comma(numFiles)} file(s).`);
+  return '0'
+}
+function comma (n) {
+  if (typeof n !== 'number') return ''
+  return n.toLocaleString()
+}
+const fmtDate = tinydate('{DD}-{MM}-{YY} {HH}:{mm}:{ss}');
+
+async function ls (url, options) {
+  const { directory } = options;
+  if (directory && !url.endsWith('/')) url += '/';
+  let totalCount = 0;
+  let totalSize = 0;
+  const fileStream = dist_4(url, {
+    Delimiter: directory ? '/' : undefined
+  });
+  for await (const { Key, Prefix, ETag, Size, LastModified } of fileStream) {
+    if (Key && Key.endsWith('/')) continue
+    totalCount++;
+    totalSize += Size || 0;
+    report('list.file', {
+      ...options,
+      key: Prefix || Key,
+      md5: ETag ? ETag.replace(/"/g, '') : undefined,
+      mtime: LastModified,
+      size: Size
+    });
   }
+  report('list.file.totals', { ...options, totalSize, totalCount });
 }
 
 class Speedo {
-  constructor ({ length = 10 } = {}) {
-    this.length = length;
+  constructor ({ window = 10 } = {}) {
+    this.windowSize = window;
     this.start = Date.now();
     this.readings = [[this.start, 0]];
   }
-  update (n) {
-    this.readings.push([Date.now(), n]);
-    if (this.readings.length > this.length) {
-      this.readings.splice(0, this.readings.length - this.length);
+  update (data) {
+    if (typeof data === 'number') data = { current: data };
+    const { current, total } = data;
+    if (total) this.total = total;
+    this.readings.push([Date.now(), current]);
+    if (this.readings.length > this.windowSize) {
+      this.readings.splice(0, this.readings.length - this.windowSize);
     }
-    this.current = n;
+    this.current = current;
+  }
+  get done () {
+    return this.total && this.current >= this.total
   }
   rate () {
-    if (this.readings.length < 2) return null
+    if (this.readings.length < 2) return 0
+    if (this.done) return this.current * 1e3 / this.taken
     const last = this.readings[this.readings.length - 1];
     const first = this.readings[0];
-    return (1e3 * (last[1] - first[1])) / (last[0] - first[0])
+    return ((last[1] - first[1]) * 1e3) / (last[0] - first[0])
   }
   percent () {
     if (!this.total) return null
-    return Math.round((100 * this.current) / this.total)
+    return this.done ? 100 : Math.round((100 * this.current) / this.total)
   }
   eta () {
-    if (!this.total) return null
+    if (!this.total || this.done) return 0
     const rate = this.rate();
-    if (rate === null) return null
-    return (this.total - this.current) / rate
+    if (!rate) return 0
+    return (1e3 * (this.total - this.current)) / rate
   }
   taken () {
-    return (this.readings[this.readings.length - 1][0] - this.start) / 1e3
+    return this.readings[this.readings.length - 1][0] - this.start
   }
 }
+var dist$4 = Speedo;
 
 function upload (file, url, { progress, limit }) {
   return dist_6(file, url, {
@@ -886,42 +1088,20 @@ function upload (file, url, { progress, limit }) {
   })
 }
 function doProgress (url) {
-  log(url);
-  const speedo = new Speedo();
-  let started = false;
-  let sizeLength;
+  report('file.transfer.start', url);
+  const speedo = new dist$4();
+  const direction = 'uploaded';
   return ({ bytes, total, done }) => {
-    if (!started) {
-      started = true;
-      speedo.total = total;
-      sizeLength = comma(total).length;
-    }
-    speedo.update(bytes);
-    if (done) {
-      const taken = speedo.taken();
-      log(
-        [
-          '  ',
-          `${comma(bytes)} bytes uploaded `,
-          `in ${time(taken)} `,
-          `at ${size(bytes / taken)}B/s`
-        ].join('')
-      );
-    } else {
-      log.status(
-        [
-          '  ',
-          `${comma(bytes).padStart(sizeLength)} `,
-          `${speedo
-            .percent()
-            .toString()
-            .padStart(3)}% `,
-          `time ${time(speedo.taken())} `,
-          `eta ${time(speedo.eta())} `,
-          `rate ${size(speedo.rate())}B/s`
-        ].join('')
-      );
-    }
+    speedo.update({ current: bytes, total });
+    report(`file.transfer.${done ? 'done' : 'update'}`, {
+      bytes,
+      percent: speedo.percent(),
+      total,
+      taken: speedo.taken(),
+      eta: speedo.eta(),
+      speed: speedo.rate(),
+      direction
+    });
   }
 }
 
@@ -932,44 +1112,46 @@ function download (url, file, { progress, limit }) {
   })
 }
 function doProgress$1 (dest) {
-  log(path.resolve(dest));
-  const speedo = new Speedo();
-  let started = false;
-  let sizeLength;
+  report('file.transfer.start', path.resolve(dest));
+  const speedo = new dist$4();
+  const direction = 'downloaded';
   return ({ bytes, total, done }) => {
-    if (!started) {
-      started = true;
-      speedo.total = total;
-      sizeLength = comma(total).length;
-    }
-    speedo.update(bytes);
-    if (done) {
-      const taken = speedo.taken();
-      log(
-        [
-          '  ',
-          `${comma(bytes)} bytes downloaded `,
-          `in ${time(taken)} `,
-          `at ${size(bytes / taken)}B/s`
-        ].join('')
-      );
-    } else {
-      log.status(
-        [
-          '  ',
-          `${comma(bytes).padStart(sizeLength)} `,
-          `${speedo
-            .percent()
-            .toString()
-            .padStart(3)}% `,
-          `time ${time(speedo.taken())} `,
-          `eta ${time(speedo.eta())} `,
-          `rate ${size(speedo.rate())}B/s`
-        ].join('')
-      );
-    }
+    speedo.update({ current: bytes, total });
+    report(`file.transfer.${done ? 'done' : 'update'}`, {
+      bytes,
+      percent: speedo.percent(),
+      total,
+      taken: speedo.taken(),
+      eta: speedo.eta(),
+      speed: speedo.rate(),
+      direction
+    });
   }
 }
+
+function retry (fn, opts = {}) {
+  return tryOne({ ...opts, fn, attempt: 1 })
+}
+function tryOne (options) {
+  const {
+    fn,
+    attempt,
+    retries = 10,
+    delay = 1000,
+    backoff = retry.exponential(1.5),
+    onRetry
+  } = options;
+  return new Promise(resolve => resolve(fn())).catch(error => {
+    if (attempt > retries) throw error
+    if (onRetry) onRetry({ error, attempt, delay });
+    return sleep(delay).then(() =>
+      tryOne({ ...options, attempt: attempt + 1, delay: backoff(delay) })
+    )
+  })
+}
+retry.exponential = x => n => Math.round(n * x);
+const sleep = delay => new Promise(resolve => setTimeout(resolve, delay));
+var dist$5 = retry;
 
 function deserialize (obj) {
   if (Array.isArray(obj)) return obj.map(deserialize)
@@ -1250,7 +1432,7 @@ async function sync (
 ) {
   lRoot = lRoot.replace(/\/$/, '');
   rRoot = rRoot.replace(/\/$/, '');
-  log.status('Scanning files');
+  report('sync.start');
   const filter = getFilter(options);
   const lFiles = Local.scan(lRoot, filter);
   const rFiles = Remote.scan(rRoot, filter);
@@ -1258,9 +1440,9 @@ async function sync (
   for await (const [local, remote] of match('path', lFiles, rFiles)) {
     fileCount++;
     const path = local ? local.path : remote.path;
-    log.status(path);
+    report('sync.file.start', path);
     if (local) {
-      local.on('hashing', () => log.status(`${local.path} - hashing`));
+      local.on('hashing', () => report('sync.file.hashing', path));
       await local.getHash();
     }
     if (local && remote) {
@@ -1288,35 +1470,59 @@ async function sync (
       }
     }
   }
-  log(`${comma(fileCount)} files processed.`);
+  report('sync.done', { count: fileCount });
   async function uploadFile ({ path, fullpath }) {
-    if (dryRun) return log(`${path} - upload (dry run)`)
-    return retry(() =>
-      upload(fullpath, `${rRoot}/${path}`, {
-        ...options,
-        progress: true
-      })
+    if (dryRun) {
+      report('sync.file.dryrun', { path, action: 'upload' });
+      return
+    }
+    return dist$5(
+      () =>
+        upload(fullpath, `${rRoot}/${path}`, {
+          ...options,
+          progress: true
+        }),
+      {
+        retries: 5,
+        delay: 5000,
+        onRetry: data => report('retry', data)
+      }
     )
   }
   async function downloadFile ({ path: path$1, url }) {
-    if (dryRun) return log(`${path$1} - download (dry run)`)
-    return retry(() =>
-      download(url, path.join(lRoot, path$1), {
-        ...options,
-        progress: true
-      })
+    if (dryRun) {
+      report('sync.file.dryrun', { path: path$1, action: 'download' });
+      return
+    }
+    return dist$5(
+      () =>
+        download(url, path.join(lRoot, path$1), {
+          ...options,
+          progress: true
+        }),
+      {
+        retries: 5,
+        delay: 5000,
+        onRetry: data => report('retry', data)
+      }
     )
   }
   async function deleteLocal ({ path: path$1 }) {
-    if (dryRun) return log(`${path$1} - delete (dry run)`)
+    if (dryRun) {
+      report('sync.file.dryrun', { path: path$1, action: 'delete' });
+      return
+    }
     return fs.promises.unlink(path.join(lRoot, path$1))
   }
   async function deleteRemote ({ path }) {
-    if (dryRun) return log(`${path} - delete (dry run)`)
+    if (dryRun) {
+      report('sync.file.dryrun', { path, action: 'delete' });
+      return
+    }
     const url = `${rRoot}/${path}`;
-    log.status(`${url} - deleting`);
+    report('delete.file.start', url);
     await dist_1(url);
-    log(`${url} - deleted`);
+    report('delete.file.done', url);
   }
 }
 function getFilter ({ filter }) {
