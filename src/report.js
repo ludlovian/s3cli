@@ -7,7 +7,7 @@ import tinydate from 'tinydate'
 import log from './log'
 
 const reporter = new EventEmitter()
-const { green } = kleur
+const { green, cyan } = kleur
 
 export default function report (msg, payload) {
   reporter.emit(msg, payload)
@@ -33,7 +33,7 @@ reporter
     const s = human ? `${fmtSize(totalSize)}B` : `${comma(totalSize)} bytes`
     log(`\n${s} in ${comma(totalCount)} file${totalCount > 1 ? 's' : ''}`)
   })
-  .on('file.transfer.start', url => log(url))
+  .on('file.transfer.start', url => log(cyan(url)))
   .on(
     'file.transfer.update',
     ({ bytes, percent, total, taken, eta, speed }) => {
@@ -41,8 +41,8 @@ reporter
         [
           comma(bytes).padStart(1 + comma(total).length),
           `${percent.toString().padStart(3)}%`,
-          `time ${fmtDuration(taken)}`,
-          `eta ${fmtDuration(eta)}`,
+          `time ${ms(taken)}`,
+          `eta ${ms(eta)}`,
           `rate ${fmtSize(speed)}B/s`
         ].join(' ')
       )
@@ -50,12 +50,14 @@ reporter
   )
   .on('file.transfer.done', ({ bytes, taken, speed, direction }) => {
     log(
-      [
-        ` ${comma(bytes)} bytes`,
-        direction,
-        `in ${fmtDuration(taken)}`,
-        `at ${fmtSize(bytes / taken)}B/s`
-      ].join(' ')
+      green(
+        [
+          ` ${comma(bytes)} bytes`,
+          direction,
+          `in ${ms(taken, { long: true })}`,
+          `at ${fmtSize((bytes * 1e3) / taken)}B/s`
+        ].join(' ')
+      )
     )
   })
   .on('sync.start', () => log.status('Scanning files'))
@@ -69,27 +71,20 @@ reporter
   )
   .on('delete.file.start', path => log.status(`${path} - deleting `))
   .on('delete.file.done', path => log(`${path} - deleted`))
-  .on('retry', ({ delay, err }) => {
+  .on('retry', ({ delay, error }) => {
     console.error(
-      `\nError occured: ${err.message}\nWaiting ${ms(delay)} to retry...`
+      `\nError occured: ${error.message}\nWaiting ${ms(delay)} to retry...`
     )
   })
   .on('stat.start', url => log(url + '\n'))
-  .on('stat.details', ({ key, value, width }) => log(
-    [
-      green(`${key}:`.padEnd(width + 2)),
-      value instanceof Date ? fmtDate(value) : value
-    ].join('')
-  ))
-
-function fmtDuration (ms) {
-  const secs = Math.round(ms / 1e3)
-  const mn = Math.floor(secs / 60)
-    .toString()
-    .padStart(2, '0')
-  const sc = (secs % 60).toString().padStart(2, '0')
-  return `${mn}:${sc}`
-}
+  .on('stat.details', ({ key, value, width }) =>
+    log(
+      [
+        green(`${key}:`.padEnd(width + 2)),
+        value instanceof Date ? fmtDate(value) : value
+      ].join('')
+    )
+  )
 
 function fmtSize (n) {
   const suffixes = [
