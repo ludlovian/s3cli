@@ -28,19 +28,19 @@
     "ms": "^2.1.2",
     "retry": "github:ludlovian/retry",
     "s3js": "github:ludlovian/s3js",
-    "sade": "^1.6.1",
+    "sade": "^1.7.0",
     "speedo": "github:ludlovian/speedo",
     "tinydate": "^1.2.0"
   },
   "devDependencies": {
     "esm": "^3.2.25",
-    "prettier-standard": "^15.0.1",
-    "rollup": "^1.27.5",
+    "prettier-standard": "^16.1.0",
+    "rollup": "^1.27.13",
     "rollup-plugin-cleanup": "^3.1.1",
     "rollup-plugin-commonjs": "^10.1.0",
     "rollup-plugin-json": "^4.0.0",
     "rollup-plugin-node-resolve": "^5.2.0",
-    "rollup-plugin-terser": "^5.1.2",
+    "rollup-plugin-terser": "^5.1.3",
     "snazzy": "^8.0.0",
     "standard": "^14.3.1"
   }

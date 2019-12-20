@@ -160,6 +160,8 @@ var help = function (bin, tree, key, single) {
 			out += (NL + __ + __ + `${pfx} ${k} --help`);
 		});
 		out += NL;
+	} else if (!single && key !== DEF) {
+		out += section('Aliases', cmd.alibi, prefix);
 	}
 	out += section('Options', format(cmd.options), noop);
 	out += section('Examples', cmd.examples.map(prefix), noop);
@@ -215,12 +217,19 @@ class Sade {
 		usage = usage.join(' ');
 		this.curr = cmd;
 		if (opts.default) this.default=cmd;
-		this.tree[cmd] = { usage, options:[], alias:{}, default:{}, examples:[] };
+		this.tree[cmd] = { usage, alibi:[], options:[], alias:{}, default:{}, examples:[] };
+		if (opts.alias) this.alias(opts.alias);
 		if (desc) this.describe(desc);
 		return this;
 	}
 	describe(str) {
 		this.tree[this.curr || DEF$1].describe = Array.isArray(str) ? str : utils.sentences(str);
+		return this;
+	}
+	alias(...names) {
+		if (this.single) throw new Error('Cannot call `alias()` in "single" mode');
+		if (!this.curr) throw new Error('Cannot call `alias()` before defining a command');
+		this.tree[this.curr].alibi = this.tree[this.curr].alibi.concat(...names);
 		return this;
 	}
 	option(str, desc, val) {
@@ -266,11 +275,18 @@ class Sade {
 		if (isSingle) {
 			cmd = this.tree[DEF$1];
 		} else {
-			let i=1, len=argv._.length + 1;
+			let k, i=1, len=argv._.length + 1;
 			for (; i < len; i++) {
 				tmp = argv._.slice(0, i).join(' ');
 				if (this.tree[tmp] !== void 0) {
 					name=tmp; offset=(i + 2);
+				} else {
+					for (k in this.tree) {
+						if (this.tree[k].alibi.includes(tmp)) {
+							name=k; offset=(i + 2);
+							break;
+						}
+					}
 				}
 			}
 			cmd = this.tree[name];
@@ -351,67 +367,60 @@ function createCommonjsModule(fn, module) {
 	return module = { exports: {} }, fn(module, module.exports), module.exports;
 }
 
-function throttler (options) {
-  if (typeof options !== 'object') options = { rate: options };
-  const bytesPerSecond = ensureNumber(options.rate);
-  const chunkSize = Math.max(Math.ceil(bytesPerSecond / 10));
-  const stream$1 = new stream.Transform({
-    ...options,
-    transform (data, encoding, callback) {
-      takeChunk.call(this, data, callback);
+class Throttler extends stream.Transform {
+  constructor (options) {
+    if (typeof options !== 'object') options = { rate: options };
+    super(options);
+    const {
+      rate,
+      chunkTime = 100,
+      windowSize = 30
+    } = options;
+    const bytesPerSecond = ensureNumber(rate);
+    Object.assign(this, {
+      bytesPerSecond,
+      chunkSize: Math.max(1, Math.ceil((bytesPerSecond * chunkTime) / 1e3)),
+      chunkBytes: 0,
+      totalBytes: 0,
+      windowSize,
+      window: [[0, Date.now()]]
+    });
+    this.on('pipe', src => src.once('error', err => this.emit('error', err)));
+  }
+  _transform (data, enc, callback) {
+    while (true) {
+      if (!data.length) return callback()
+      const chunk = data.slice(0, this.chunkSize - this.chunkBytes);
+      const rest = data.slice(chunk.length);
+      this.chunkBytes += chunk.length;
+      if (this.chunkBytes < this.chunkSize) {
+        this.push(chunk);
+        return callback()
+      }
+      this.chunkBytes -= this.chunkSize;
+      this.totalBytes += this.chunkSize;
+      const now = Date.now();
+      const [startBytes, startTime] = this.window[0];
+      const eta =
+        startTime + ((this.totalBytes - startBytes) * 1e3) / this.bytesPerSecond;
+      this.window.push([this.totalBytes, Math.max(now, eta)]);
+      if (this.window.length > this.windowSize) {
+        this.window.splice(0, this.windowLength - this.windowSize);
+      }
+      if (now > eta) {
+        this.push(chunk);
+        data = rest;
+        continue
+      }
+      return setTimeout(() => {
+        this.push(chunk);
+        this._transform(rest, enc, callback);
+      }, eta - now)
     }
-  });
-  Object.assign(stream$1, {
-    bytesPerSecond,
-    chunkSize,
-    chunkBytes: 0,
-    windowMaxTimeMs: 30 * 1000
-  });
-  resetWindow.call(stream$1);
-  stream$1.on('pipe', src => src.once('error', err => stream$1.emit(err)));
-  return stream$1
-}
-function takeChunk (data, done) {
-  const chunk = data.slice(0, this.chunkSize - this.chunkBytes);
-  const rest = data.slice(chunk.length);
-  if (rest.length) {
-    processChunk.call(this, chunk, takeChunk.bind(this, rest, done));
-  } else {
-    processChunk.call(this, chunk, done);
   }
 }
-function processChunk (data, done) {
-  const size = data.length;
-  this.chunkBytes += size;
-  this.windowBytes += size;
-  if (this.chunkBytes < this.chunkSize) {
-    return pushChunk.call(this, data, done)
-  }
-  this.chunkBytes -= this.chunkSize;
-  const delay = calculateDelay.call(this);
-  if (!delay) {
-    pushChunk.call(this, data, done);
-  } else {
-    setTimeout(pushChunk.bind(this, data, done), delay);
-  }
-}
-function pushChunk (chunk, done) {
-  this.push(chunk);
-  done();
-}
-function calculateDelay () {
-  const windowTimeMs = getTimeMs() - this.windowStartMs;
-  const expectedTimeMs = (1e3 * this.windowBytes) / this.bytesPerSecond;
-  if (windowTimeMs > this.windowMaxTimeMs) resetWindow.call(this);
-  return Math.max(expectedTimeMs - windowTimeMs, 0)
-}
-function resetWindow () {
-  this.windowStartMs = getTimeMs();
-  this.windowBytes = 0;
-}
-function getTimeMs () {
-  const [seconds, nanoseconds] = process.hrtime();
-  return seconds * 1e3 + Math.floor(nanoseconds / 1e6)
+function throttler (options) {
+  return new Throttler(options)
 }
 function ensureNumber (value) {
   let n = (value + '').toLowerCase();
@@ -449,7 +458,7 @@ function progress (opts = {}) {
   ts.on('pipe', src =>
     src.on('error', err => {
       error = error || err;
-      ts.emit(err);
+      ts.emit('error', err);
     })
   );
   return ts
