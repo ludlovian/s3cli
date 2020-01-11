@@ -403,10 +403,10 @@ class Throttler extends stream.Transform {
       const [startBytes, startTime] = this.window[0];
       const eta =
         startTime + ((this.totalBytes - startBytes) * 1e3) / this.bytesPerSecond;
-      this.window.push([this.totalBytes, Math.max(now, eta)]);
-      if (this.window.length > this.windowSize) {
-        this.window.splice(0, this.windowLength - this.windowSize);
-      }
+      this.window = [
+        ...this.window,
+        [this.totalBytes, Math.max(now, eta)]
+      ].slice(-this.windowSize);
       if (now > eta) {
         this.push(chunk);
         data = rest;
@@ -1150,10 +1150,9 @@ class Speedo {
     if (typeof data === 'number') data = { current: data };
     const { current, total } = data;
     if (total) this.total = total;
-    this.readings.push([Date.now(), current]);
-    if (this.readings.length > this.windowSize) {
-      this.readings.splice(0, this.readings.length - this.windowSize);
-    }
+    this.readings = [...this.readings, [Date.now(), current]].slice(
+      -this.windowSize
+    );
     this.current = current;
   }
   get done () {
@@ -1332,6 +1331,7 @@ const jsdbMethods = new Set([
   'find',
   'findOne',
   'findAll',
+  'getAll',
   'compact',
   'reload'
 ]);
