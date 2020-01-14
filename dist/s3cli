@@ -357,7 +357,7 @@ function wrap (fn) {
     })
 }
 
-var version = "1.4.3";
+var version = "1.4.4";
 
 function unwrapExports (x) {
 	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
@@ -1115,7 +1115,7 @@ function comma (n) {
   if (typeof n !== 'number') return ''
   return n.toLocaleString()
 }
-const fmtDate = tinydate('{DD}-{MM}-{YY} {HH}:{mm}:{ss}');
+const fmtDate = tinydate('{YYYY}-{MM}-{DD} {HH}:{mm}:{ss}');
 
 async function ls (url, options) {
   const { directory } = options;
