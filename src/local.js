@@ -5,7 +5,7 @@ import EventEmitter from 'events'
 import fs from 'fs'
 import { resolve, relative } from 'path'
 
-import Datastore from 'jsdbd'
+import Database from 'jsdbd'
 import filescan from 'filescan'
 
 import { once } from './util'
@@ -55,7 +55,7 @@ export default class Local extends EventEmitter {
 }
 
 const getDB = once(async () => {
-  const db = new Datastore('file_md5_cache.db')
+  const db = new Database('file_md5_cache.db')
   await db.ensureIndex({ fieldName: 'path', unique: true })
   return db
 })

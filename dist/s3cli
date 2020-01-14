@@ -1443,6 +1443,9 @@ class Remote extends EventEmitter {
   constructor (data) {
     super();
     Object.assign(this, data);
+    if (this.etag && !this.etag.includes('-')) {
+      this.hash = this.etag;
+    }
   }
   static async * scan (root, filter) {
     const { Bucket, Key: Prefix } = dist_3(root);
@@ -1453,11 +1456,37 @@ class Remote extends EventEmitter {
         path: path$1,
         root,
         url: `${Bucket}/${data.Key}`,
-        hash: data.ETag.replace(/"/g, '')
+        etag: data.ETag.replace(/"/g, '')
       });
     }
   }
+  async getHash () {
+    if (this.hash) return this.hash
+    const db = await getDB$1();
+    const rec = await db.findOne('url', this.url);
+    if (rec) {
+      if (this.etag === rec.etag) {
+        this.hash = rec.hash;
+        return this.hash
+      }
+    }
+    this.emit('hashing');
+    const stats = await dist_5(`s3://${this.url}`);
+    this.hash = stats.md5 || 'UNKNOWN';
+    await db.upsert({
+      ...(rec || {}),
+      url: this.url,
+      etag: this.etag,
+      hash: this.hash
+    });
+    return this.hash
+  }
 }
+const getDB$1 = once(async () => {
+  const db = new Datastore('s3file_md5_cache.db');
+  await db.ensureIndex({ fieldName: 'url', unique: true });
+  return db
+});
 
 async function * match (selectKey, ...sources) {
   selectKey = makeSelector(selectKey);
@@ -1545,6 +1574,10 @@ async function sync (
     if (local) {
       local.on('hashing', () => report('sync.file.hashing', path));
       await local.getHash();
+    }
+    if (remote) {
+      remote.on('hashing', () => report('sync.file.hashing', path));
+      await remote.getHash();
     }
     if (local && remote) {
       if (local.hash === remote.hash) continue

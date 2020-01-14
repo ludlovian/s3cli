@@ -34,6 +34,10 @@ export default async function sync (
       local.on('hashing', () => report('sync.file.hashing', path))
       await local.getHash()
     }
+    if (remote) {
+      remote.on('hashing', () => report('sync.file.hashing', path))
+      await remote.getHash()
+    }
     if (local && remote) {
       // if they are the same, we can skip this file
       if (local.hash === remote.hash) continue
