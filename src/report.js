@@ -14,8 +14,8 @@ export default function report (msg, payload) {
 }
 
 reporter
-  .on('list.file', ({ key, md5, mtime, size, long, human }) => {
-    if (long) {
+  .on('list.file', ({ key, md5, mtime, size, long, human, directory }) => {
+    if (long && !directory) {
       log(
         [
           (md5 || '').padEnd(32),

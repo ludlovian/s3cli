@@ -1,4 +1,4 @@
-import { scan } from 's3js'
+import { scan, stat, parseAddress } from 's3js'
 
 import report from './report'
 
@@ -8,6 +8,7 @@ export default async function ls (url, options) {
 
   let totalCount = 0
   let totalSize = 0
+  const { Bucket } = parseAddress(url)
 
   const fileStream = scan(url, {
     Delimiter: directory ? '/' : undefined
@@ -19,10 +20,16 @@ export default async function ls (url, options) {
     totalCount++
     totalSize += Size || 0
 
+    let md5 = ETag ? ETag.replace(/"/g, '') : undefined
+    if (md5 && Key && md5.includes('-')) {
+      const stats = await stat(`s3://${Bucket}/${Key}`)
+      md5 = stats.md5 || 'UNKNOWN'
+    }
+
     report('list.file', {
       ...options,
       key: Prefix || Key,
-      md5: ETag ? ETag.replace(/"/g, '') : undefined,
+      md5,
       mtime: LastModified,
       size: Size
     })
