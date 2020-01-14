@@ -107,4 +107,4 @@ function comma (n) {
   return n.toLocaleString()
 }
 
-const fmtDate = tinydate('{DD}-{MM}-{YY} {HH}:{mm}:{ss}')
+const fmtDate = tinydate('{YYYY}-{MM}-{DD} {HH}:{mm}:{ss}')
