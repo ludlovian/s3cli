@@ -357,7 +357,7 @@ function wrap (fn) {
     })
 }
 
-var version = "1.4.4";
+var version = "1.4.5";
 
 function unwrapExports (x) {
 	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
@@ -1026,18 +1026,23 @@ function report (msg, payload) {
   reporter.emit(msg, payload);
 }
 reporter
-  .on('list.file', ({ key, md5, mtime, size, long, human, directory }) => {
-    if (long && !directory) {
+  .on('list.file', data => {
+    if (data.long) {
+      let type;
+      let size = '';
+      let time = '';
+      if (data.directory) {
+        type = 'D';
+      } else {
+        type = data.storageClass;
+        size = data.human ? fmtSize(data.size) : data.size.toString();
+        if (data.mtime) time = fmtDate(data.mtime);
+      }
       log(
-        [
-          (md5 || '').padEnd(32),
-          (human ? fmtSize(size) : size.toString()).padStart(9),
-          (mtime ? fmtDate(mtime) : '').padEnd(17),
-          key
-        ].join('  ')
+        [type.padEnd(1), size.padStart(10), time.padEnd(18), data.key].join('  ')
       );
     } else {
-      log(key);
+      log(data.key);
     }
   })
   .on('list.file.totals', ({ totalSize, totalCount, total, human }) => {
@@ -1115,36 +1120,40 @@ function comma (n) {
   if (typeof n !== 'number') return ''
   return n.toLocaleString()
 }
-const fmtDate = tinydate('{YYYY}-{MM}-{DD} {HH}:{mm}:{ss}');
+const fmtDate = tinydate('{DD}-{MMM}-{YY} {HH}:{mm}:{ss}', {
+  MMM: d => d.toLocaleString(undefined, { month: 'short' })
+});
 
 async function ls (url, options) {
   const { directory } = options;
   if (directory && !url.endsWith('/')) url += '/';
   let totalCount = 0;
   let totalSize = 0;
-  const { Bucket } = dist_3(url);
   const fileStream = dist_4(url, {
     Delimiter: directory ? '/' : undefined
   });
-  for await (const { Key, Prefix, ETag, Size, LastModified } of fileStream) {
+  for await (const {
+    Key,
+    Prefix,
+    Size,
+    LastModified,
+    StorageClass
+  } of fileStream) {
     if (Key && Key.endsWith('/')) continue
     totalCount++;
     totalSize += Size || 0;
-    let md5 = ETag ? ETag.replace(/"/g, '') : undefined;
-    if (md5 && Key && md5.includes('-')) {
-      const stats = await dist_5(`s3://${Bucket}/${Key}`);
-      md5 = stats.md5 || 'UNKNOWN';
-    }
-    report('list.file', {
-      ...options,
-      key: Prefix || Key,
-      md5,
-      mtime: LastModified,
-      size: Size
-    });
+    const storageClass = STORAGE_CLASS[StorageClass] || '?';
+    const key = Prefix || Key;
+    const mtime = LastModified;
+    const size = Size;
+    report('list.file', { ...options, key, mtime, size, storageClass });
   }
   report('list.file.totals', { ...options, totalSize, totalCount });
 }
+const STORAGE_CLASS = {
+  STANDARD: 'S',
+  GLACIER: 'G'
+};
 
 class Speedo {
   constructor ({ window = 10 } = {}) {
