@@ -14,18 +14,24 @@ export default function report (msg, payload) {
 }
 
 reporter
-  .on('list.file', ({ key, md5, mtime, size, long, human, directory }) => {
-    if (long && !directory) {
+  .on('list.file', data => {
+    if (data.long) {
+      let type
+      let size = ''
+      let time = ''
+
+      if (data.directory) {
+        type = 'D'
+      } else {
+        type = data.storageClass
+        size = data.human ? fmtSize(data.size) : data.size.toString()
+        if (data.mtime) time = fmtDate(data.mtime)
+      }
       log(
-        [
-          (md5 || '').padEnd(32),
-          (human ? fmtSize(size) : size.toString()).padStart(9),
-          (mtime ? fmtDate(mtime) : '').padEnd(17),
-          key
-        ].join('  ')
+        [type.padEnd(1), size.padStart(10), time.padEnd(18), data.key].join('  ')
       )
     } else {
-      log(key)
+      log(data.key)
     }
   })
   .on('list.file.totals', ({ totalSize, totalCount, total, human }) => {
@@ -107,4 +113,6 @@ function comma (n) {
   return n.toLocaleString()
 }
 
-const fmtDate = tinydate('{YYYY}-{MM}-{DD} {HH}:{mm}:{ss}')
+const fmtDate = tinydate('{DD}-{MMM}-{YY} {HH}:{mm}:{ss}', {
+  MMM: d => d.toLocaleString(undefined, { month: 'short' })
+})
