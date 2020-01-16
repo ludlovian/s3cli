@@ -357,7 +357,7 @@ function wrap (fn) {
     })
 }
 
-var version = "1.4.6";
+var version = "1.4.7";
 
 function unwrapExports (x) {
 	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
@@ -1039,7 +1039,9 @@ reporter
         if (data.mtime) time = fmtDate(data.mtime);
       }
       log(
-        [type.padEnd(1), size.padStart(10), time.padEnd(18), data.key].join('  ')
+        [type.padEnd(1), size.padStart(10), time.padEnd(18), data.key].join(
+          '  '
+        )
       );
     } else {
       log(data.key);
