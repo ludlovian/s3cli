@@ -26,6 +26,8 @@
     "jsdbd": "github:ludlovian/jsdbd",
     "kleur": "^3.0.3",
     "ms": "^2.1.2",
+    "promise-catchif": "github:ludlovian/promise-catchif",
+    "promise-map": "github:ludlovian/promise-map",
     "retry": "github:ludlovian/retry",
     "s3js": "github:ludlovian/s3js",
     "sade": "^1.7.0",

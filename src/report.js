@@ -28,7 +28,9 @@ reporter
         if (data.mtime) time = fmtDate(data.mtime)
       }
       log(
-        [type.padEnd(1), size.padStart(10), time.padEnd(18), data.key].join('  ')
+        [type.padEnd(1), size.padStart(10), time.padEnd(18), data.key].join(
+          '  '
+        )
       )
     } else {
       log(data.key)
