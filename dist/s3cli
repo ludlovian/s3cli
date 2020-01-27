@@ -1689,7 +1689,7 @@ async function stat (url) {
   for (let [k, v] of Object.entries(data)) {
     k = k.charAt(0).toLowerCase() + k.slice(1);
     if (k === 'metadata') continue
-    if (k.endsWith('time')) v = new Date(v);
+    if (k.endsWith('time')) v = new Date(v * 1000);
     if (k === 'mode') v = '0o' + v.toString(8);
     results.push([k, v]);
   }
