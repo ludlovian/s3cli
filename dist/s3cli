@@ -362,7 +362,7 @@ function wrap (fn) {
     })
 }
 
-var version = "1.4.9";
+var version = "1.4.10";
 
 function unwrapExports (x) {
 	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
@@ -1175,7 +1175,8 @@ async function ls (url, options) {
 const STORAGE_CLASS = {
   STANDARD: 'S',
   STANDARD_IA: 'I',
-  GLACIER: 'G'
+  GLACIER: 'G',
+  DEEP_ARCHIVE: 'D'
 };
 
 class Speedo {
