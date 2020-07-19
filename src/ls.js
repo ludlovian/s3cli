@@ -38,5 +38,6 @@ export default async function ls (url, options) {
 const STORAGE_CLASS = {
   STANDARD: 'S',
   STANDARD_IA: 'I',
-  GLACIER: 'G'
+  GLACIER: 'G',
+  DEEP_ARCHIVE: 'D'
 }
