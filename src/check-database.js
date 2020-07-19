@@ -1,7 +1,6 @@
 'use strict'
 
-require('promise-map')()
-require('promise-catchif')()
+require('promise-goodies')()
 const Database = require('jsdbd')
 const fs = require('fs')
 const s3js = require('s3js')
