@@ -56,6 +56,7 @@ export default class Local extends EventEmitter {
 
 const getDB = once(async () => {
   const db = new Database('file_md5_cache.db')
+  await db.check()
   await db.ensureIndex({ fieldName: 'path', unique: true })
   return db
 })

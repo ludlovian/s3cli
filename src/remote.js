@@ -59,6 +59,7 @@ export default class Remote extends EventEmitter {
 
 const getDB = once(async () => {
   const db = new Database('s3file_md5_cache.db')
+  await db.check()
   await db.ensureIndex({ fieldName: 'url', unique: true })
   return db
 })

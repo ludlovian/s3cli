@@ -4,7 +4,7 @@ const CSI = '\u001B['
 const CR = '\r'
 const EOL = `${CSI}0K`
 
-var dirty = false
+let dirty = false
 
 function log (string) {
   if (dirty) {
