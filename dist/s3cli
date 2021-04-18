@@ -394,7 +394,7 @@ function wrap (fn) {
     })
 }
 
-var version = "1.4.10";
+var version = "1.4.11";
 
 class Throttler extends stream__default['default'].Transform {
   constructor (options) {
