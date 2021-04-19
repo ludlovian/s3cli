@@ -2,15 +2,15 @@ const CSI = '\u001B['
 const CR = '\r'
 const EOL = `${CSI}0K`
 
-function log (string, { clearLine, newline = true, limitWidth } = {}) {
+function log (string, { newline = true, limitWidth } = {}) {
   if (log.prefix) {
     string = log.prefix + string
   }
   if (limitWidth && log.width) {
     string = truncateToWidth(string, log.width)
   }
-  if (clearLine) {
-    if (log.dirty) string = CR + EOL + string
+  if (log.dirty) {
+    string = CR + EOL + string
   }
   if (newline) {
     string = string + '\n'
@@ -24,7 +24,6 @@ function log (string, { clearLine, newline = true, limitWidth } = {}) {
 
 log.status = string =>
   log(string, {
-    clearLine: true,
     newline: false,
     limitWidth: true
   })
