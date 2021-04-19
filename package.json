@@ -1,6 +1,6 @@
 {
   "name": "s3cli",
-  "version": "1.4.11",
+  "version": "1.4.12",
   "description": "Simple CLI for AWS S3",
   "main": "dist/s3cli",
   "scripts": {
