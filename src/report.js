@@ -50,7 +50,7 @@ reporter
           comma(bytes).padStart(1 + comma(total).length),
           `${percent.toString().padStart(3)}%`,
           `time ${ms(taken)}`,
-          `eta ${ms(eta)}`,
+          `eta ${eta < 1000 ? '0s' : ms(eta)}`,
           `rate ${fmtSize(speed)}B/s`
         ].join(' ')
       )
