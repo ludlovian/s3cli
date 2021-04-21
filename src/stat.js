@@ -12,7 +12,7 @@ export default async function stat (url) {
     if (k === 'mode') v = '0o' + v.toString(8)
     results.push([k, v])
   }
-  results.sort((a, b) => (a[0] < b[b] ? -1 : a[0] > b[0] ? 1 : 0))
+  results.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
   const width = Math.max(...results.map(x => x[0].length))
   report('stat.start', url)
   for (const [key, value] of results) {
