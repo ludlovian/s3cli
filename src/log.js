@@ -38,8 +38,9 @@ if (process.stdout.isTTY) {
 
 export default log
 
-function truncateToWidth (string, maxWidth) {
-  if (string.length < maxWidth) return string
+function truncateToWidth (string, width) {
+  const maxLength = width - 2 // leave two chars at end
+  if (string.length <= maxLength) return string
   const parts = []
   let w = 0
   let full
@@ -48,11 +49,11 @@ function truncateToWidth (string, maxWidth) {
     if (full) {
       parts.push(ansiCode)
       continue
-    } else if (w + text.length < maxWidth) {
+    } else if (w + text.length <= maxLength) {
       parts.push(text, ansiCode)
       w += text.length
     } else {
-      parts.push(text.slice(0, maxWidth - w - 1), ansiCode)
+      parts.push(text.slice(0, maxLength - w), ansiCode)
       full = true
     }
   }
