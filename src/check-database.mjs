@@ -1,10 +1,11 @@
-'use strict'
+import { stat } from 'fs/promises'
 
-require('promise-goodies')()
-const Database = require('jsdbd')
-const fs = require('fs')
-const s3js = require('s3js')
+import promiseGoodies from 'promise-goodies'
+import Database from 'jsdbd'
+import { stat as s3stat } from 's3js'
+
 const dryrun = process.argv.includes('-n')
+promiseGoodies()
 
 async function checkFiles () {
   console.log('scanning files...')
@@ -14,14 +15,16 @@ async function checkFiles () {
   await db.compact({ sorted: 'path' })
   console.log(`${recs.length.toLocaleString()} files scanned`)
 
-  function checkPath (rec) {
-    return fs.promises
-      .stat(rec.path)
-      .then(() => undefined)
-      .catchif({ code: 'ENOENT' }, deleteRecord.bind(null, rec))
+  async function checkPath (rec) {
+    try {
+      await stat(rec.path)
+    } catch (err) {
+      if (err.code === 'ENOENT') return deleteRecord(rec)
+      throw err
+    }
   }
 
-  function deleteRecord (rec) {
+  async function deleteRecord (rec) {
     console.log(`${rec.path} - deleting`)
     if (dryrun) return
     return db.delete(rec)
@@ -36,14 +39,16 @@ async function checkS3Files () {
   await db.compact({ sorted: 'url' })
   console.log(`${recs.length.toLocaleString()} objects scanned`)
 
-  function checkObject (rec) {
-    return s3js
-      .stat(`s3://${rec.url}`)
-      .then(() => undefined)
-      .catchif({ code: 'NotFound' }, deleteRecord.bind(null, rec))
+  async function checkObject (rec) {
+    try {
+      await s3stat(`s3://${rec.url}`)
+    } catch (err) {
+      if (err.code === 'NotFound') return deleteRecord(rec)
+      throw err
+    }
   }
 
-  function deleteRecord (rec) {
+  async function deleteRecord (rec) {
     console.log(`${rec.url} - deleting`)
     if (dryrun) return
     return db.delete(rec)

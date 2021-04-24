@@ -1,33 +1,32 @@
-import { terser } from 'rollup-plugin-terser'
-import cleanup from 'rollup-plugin-cleanup'
-import json from 'rollup-plugin-json'
-import resolve from 'rollup-plugin-node-resolve'
-import commonjs from 'rollup-plugin-commonjs'
+import resolve from '@rollup/plugin-node-resolve'
+import replace from '@rollup/plugin-replace'
 
 export default {
-  input: 'src/s3cli.js',
-  external: [
+  input: 'src/s3cli.mjs',
+  external: [ 
+    'fs/promises',
+    'stream/promises',
+    'sade',
+    'ms',
     'aws-sdk',
-    'events',
-    'path',
-    'crypto',
-    'fs',
-    'stream',
-    'util',
-    'net',
-    'http'
+    'mime',
+    'tinydate'
   ],
   plugins: [
-    resolve(),
-    commonjs(),
-    json(),
-    cleanup(),
-    process.env.NODE_ENV === 'production' && terser()
+    resolve({
+      preferBuiltins: true
+    }),
+    replace({
+      preventAssignment: true,
+      values: {
+        __VERSION__: process.env.npm_package_version
+      }
+    })
   ],
   output: [
     {
-      file: 'dist/s3cli',
-      format: 'cjs',
+      file: 'dist/s3cli.mjs',
+      format: 'esm',
       sourcemap: false,
       banner: '#!/usr/bin/env node'
     }

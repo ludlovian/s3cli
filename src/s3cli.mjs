@@ -1,18 +1,14 @@
-'use strict'
-
 import sade from 'sade'
 
-import { wrap } from './util'
-import { version } from '../package.json'
-
-import ls from './ls'
-import upload from './upload'
-import download from './download'
-import sync from './sync'
-import stat from './stat'
-import rm from './rm'
+import ls from './ls.mjs'
+import upload from './upload.mjs'
+import download from './download.mjs'
+import sync from './sync.mjs'
+import stat from './stat.mjs'
+import rm from './rm.mjs'
 
 const prog = sade('s3cli')
+const version = '__VERSION__'
 
 prog.version(version)
 
@@ -22,19 +18,19 @@ prog
   .option('-t, --total', 'include a total in long listing')
   .option('-H, --human', 'show human sizes in long listing')
   .option('-d, --directory', 'list directories without recursing')
-  .action(wrap(ls))
+  .action(ls)
 
 prog
   .command('upload <file> <s3url>', 'upload a file to S3')
   .option('-p, --progress', 'show progress')
   .option('-l, --limit', 'limit rate')
-  .action(wrap(upload))
+  .action(upload)
 
 prog
   .command('download <s3url> <file>', 'download a file from S3')
   .option('-p, --progress', 'show progress')
   .option('-l, --limit', 'limit rate')
-  .action(wrap(download))
+  .action(download)
 
 prog
   .command('sync <dir> <s3url>', 'sync a directory with S3')
@@ -44,18 +40,27 @@ prog
   .option('-n, --dry-run', 'show what would be done')
   .option('-d, --delete', 'delete extra files on the destination')
   .option('-D, --download', 'sync from S3 down to local')
-  .action(wrap(sync))
+  .action(sync)
 
 prog
   .command('stat <s3url>')
   .describe('show details about a file')
-  .action(wrap(stat))
+  .action(stat)
 
 prog
   .command('rm <s3url>')
   .describe('delete a remote file')
-  .action(wrap(rm))
+  .action(rm)
 
-prog.parse(process.argv, {
+const parsed = prog.parse(process.argv, {
+  lazy: true,
   alias: { n: ['dryRun', 'dry-run'] }
 })
+
+if (parsed) {
+  const { args, handler } = parsed
+  handler(...args).catch(err => {
+    console.error(err)
+    process.exit(1)
+  })
+}

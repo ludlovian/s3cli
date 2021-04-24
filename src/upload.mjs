@@ -1,7 +1,8 @@
 import { upload as s3upload } from 's3js'
 
 import Speedo from 'speedo'
-import report from './report'
+
+import report from './report.mjs'
 
 export default function upload (file, url, { progress, limit }) {
   return s3upload(file, url, {

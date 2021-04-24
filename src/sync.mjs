@@ -1,15 +1,15 @@
-import fs from 'fs'
+import { unlink } from 'fs/promises'
 import { join } from 'path'
 
 import { deleteObject } from 's3js'
 import retry from 'retry'
 
-import Local from './local'
-import Remote from './remote'
-import match from './match'
-import upload from './upload'
-import download from './download'
-import report from './report'
+import Local from './local.mjs'
+import Remote from './remote.mjs'
+import match from './match.mjs'
+import upload from './upload.mjs'
+import download from './download.mjs'
+import report from './report.mjs'
 
 export default async function sync (
   lRoot,
@@ -114,7 +114,7 @@ export default async function sync (
       return
     }
 
-    return fs.promises.unlink(join(lRoot, path))
+    return unlink(join(lRoot, path))
   }
 
   async function deleteRemote ({ path }) {

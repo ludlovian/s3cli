@@ -1,13 +1,11 @@
 import EventEmitter from 'events'
-
-import kleur from 'kleur'
 import ms from 'ms'
 import tinydate from 'tinydate'
 
-import log from './log'
+import log from 'logjs'
 
 const reporter = new EventEmitter()
-const { green, cyan } = kleur
+const { green, cyan } = log
 
 export default function report (msg, payload) {
   reporter.emit(msg, payload)

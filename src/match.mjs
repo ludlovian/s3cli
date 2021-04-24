@@ -1,5 +1,3 @@
-'use strict'
-
 // generic matcher
 //
 // takes a range of streams (as async generators) and matches on keys,

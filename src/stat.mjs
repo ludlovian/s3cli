@@ -1,6 +1,6 @@
 import { stat as s3stat } from 's3js'
 
-import report from './report'
+import report from './report.mjs'
 
 export default async function stat (url) {
   const data = await s3stat(url)

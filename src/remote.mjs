@@ -1,12 +1,10 @@
-'use strict'
-
 import EventEmitter from 'events'
 import { relative } from 'path'
 
 import Database from 'jsdbd'
 import { parseAddress as s3parse, scan as s3scan, stat as s3stat } from 's3js'
 
-import { once } from './util'
+import { once } from './util.mjs'
 
 export default class Remote extends EventEmitter {
   constructor (data) {

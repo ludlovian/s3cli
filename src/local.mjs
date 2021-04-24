@@ -1,14 +1,13 @@
-'use strict'
-
 import crypto from 'crypto'
 import EventEmitter from 'events'
-import fs from 'fs'
+import { stat, realpath } from 'fs/promises'
+import { createReadStream } from 'fs'
 import { resolve, relative } from 'path'
 
 import Database from 'jsdbd'
 import filescan from 'filescan'
 
-import { once } from './util'
+import { once } from './util.mjs'
 
 export default class Local extends EventEmitter {
   constructor (data) {
@@ -29,8 +28,8 @@ export default class Local extends EventEmitter {
   async getHash () {
     if (this.hash) return this.hash
     const db = await getDB()
-    this.fullpath = await fs.promises.realpath(this.fullpath)
-    if (!this.stats) this.stats = await fs.promises.stat(this.fullpath)
+    this.fullpath = await realpath(this.fullpath)
+    if (!this.stats) this.stats = await stat(this.fullpath)
     const rec = await db.findOne('path', this.fullpath)
     if (rec) {
       if (this.stats.mtimeMs === rec.mtime && this.stats.size === rec.size) {
@@ -62,7 +61,7 @@ const getDB = once(async () => {
 })
 
 async function hashFile (file) {
-  const rs = fs.createReadStream(file)
+  const rs = createReadStream(file)
   const hasher = crypto.createHash('md5')
   for await (const chunk of rs) {
     hasher.update(chunk)

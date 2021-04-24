@@ -2,7 +2,8 @@ import { resolve } from 'path'
 import { download as s3download } from 's3js'
 
 import Speedo from 'speedo'
-import report from './report'
+
+import report from './report.mjs'
 
 export default function download (url, file, { progress, limit }) {
   return s3download(url, file, {

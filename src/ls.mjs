@@ -1,6 +1,6 @@
 import { scan } from 's3js'
 
-import report from './report'
+import report from './report.mjs'
 
 export default async function ls (url, options) {
   const { directory } = options
