@@ -1380,7 +1380,7 @@ async function rm (url) {
 }
 
 const prog = sade('s3cli');
-const version = '1.4.14';
+const version = '1.5.0';
 
 prog.version(version);
 
