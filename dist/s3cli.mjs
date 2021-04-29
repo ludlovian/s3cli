@@ -9,8 +9,10 @@ import crypto, { createHash } from 'crypto';
 import mime from 'mime';
 import { extname, resolve, join, relative } from 'path';
 import EventEmitter from 'events';
-import ms from 'ms';
+import { format as format$1 } from '@lukeed/ms';
 import tinydate from 'tinydate';
+import { format } from 'util';
+import { red, green as green$1, yellow, blue, magenta, cyan as cyan$1, grey } from 'kleur/colors';
 import { request } from 'http';
 import 'net';
 
@@ -405,92 +407,81 @@ async function deleteObject (url, opts = {}) {
   await s3.deleteObject(request).promise();
 }
 
-let FORCE_COLOR, NODE_DISABLE_COLORS, NO_COLOR, TERM, isTTY=true;
-if (typeof process !== 'undefined') {
-	({ FORCE_COLOR, NODE_DISABLE_COLORS, NO_COLOR, TERM } = process.env);
-	isTTY = process.stdout && process.stdout.isTTY;
-}
+const colourFuncs = { red, green: green$1, yellow, blue, magenta, cyan: cyan$1, grey };
+const colours = Object.keys(colourFuncs);
+const CLEAR_LINE = '\r\x1b[0K';
+const RE_DECOLOR = /(^|[^\x1b]*)((?:\x1b\[\d*m)|$)/g; // eslint-disable-line no-control-regex
 
-const $ = {
-	enabled: !NODE_DISABLE_COLORS && NO_COLOR == null && TERM !== 'dumb' && (
-		FORCE_COLOR != null && FORCE_COLOR !== '0' || isTTY
-	)
+const state = {
+  dirty: false,
+  width: process.stdout && process.stdout.columns,
+  level: process.env.LOGLEVEL,
+  write: process.stdout.write.bind(process.stdout)
 };
 
-function init(x, y) {
-	let rgx = new RegExp(`\\x1b\\[${y}m`, 'g');
-	let open = `\x1b[${x}m`, close = `\x1b[${y}m`;
+process.stdout &&
+  process.stdout.on('resize', () => (state.width = process.stdout.columns));
 
-	return function (txt) {
-		if (!$.enabled || txt == null) return txt;
-		return open + (!!~(''+txt).indexOf(close) ? txt.replace(rgx, close + open) : txt) + close;
-	};
+function _log (
+  args,
+  { newline = true, limitWidth, prefix = '', level, colour }
+) {
+  if (level && (!state.level || state.level < level)) return
+  const msg = format(...args);
+  let string = prefix + msg;
+  if (colour && colour in colourFuncs) string = colourFuncs[colour](string);
+  if (limitWidth) string = truncate(string, state.width);
+  if (newline) string = string + '\n';
+  if (state.dirty) string = CLEAR_LINE + string;
+  state.dirty = !newline && !!msg;
+  state.write(string);
 }
-const red = init(31, 39);
-const green$1 = init(32, 39);
-const yellow = init(33, 39);
-const blue = init(34, 39);
-const magenta = init(35, 39);
-const cyan$1 = init(36, 39);
-const grey = init(90, 39);
 
-const CSI = '\u001B[';
-const CR = '\r';
-const EOL = `${CSI}0K`;
-const RE_DECOLOR = /(^|[^\x1b]*)((?:\x1b\[\d*m)|$)/g;
-function log (string, { newline = true, limitWidth } = {}) {
-  if (log.prefix) {
-    string = log.prefix + string;
-  }
-  if (limitWidth && log.width) {
-    string = truncateToWidth(string, log.width);
-  }
-  const start = log.dirty ? CR + EOL : '';
-  const end = newline ? '\n' : '';
-  log.dirty = newline ? false : !!string;
-  log.write(start + string + end);
-}
-Object.assign(log, {
-  write: process.stdout.write.bind(process.stdout),
-  status: string =>
-    log(string, {
-      newline: false,
-      limitWidth: true
-    }),
-  prefix: '',
-  width: process.stdout.columns,
-  red,
-  green: green$1,
-  yellow,
-  blue,
-  magenta,
-  cyan: cyan$1,
-  grey
-});
-process.stdout.on('resize', () => {
-  log.width = process.stdout.columns;
-});
-function truncateToWidth (string, width) {
-  const maxLength = width - 2;
-  if (string.length <= maxLength) return string
+function truncate (string, max) {
+  max -= 2; // leave two chars at end
+  if (string.length <= max) return string
   const parts = [];
-  let w = 0;
-  let full;
-  for (const match of string.matchAll(RE_DECOLOR)) {
-    const [, text, ansiCode] = match;
-    if (full) {
-      parts.push(ansiCode);
-      continue
-    } else if (w + text.length <= maxLength) {
-      parts.push(text, ansiCode);
-      w += text.length;
-    } else {
-      parts.push(text.slice(0, maxLength - w), ansiCode);
-      full = true;
-    }
-  }
+  let w = 0
+  ;[...string.matchAll(RE_DECOLOR)].forEach(([, txt, clr]) => {
+    parts.push(txt.slice(0, max - w), clr);
+    w = Math.min(w + txt.length, max);
+  });
   return parts.join('')
 }
+
+function merge (old, new_) {
+  const prefix = (old.prefix || '') + (new_.prefix || '');
+  return { ...old, ...new_, prefix }
+}
+
+function logger (options) {
+  return Object.defineProperties((...args) => _log(args, options), {
+    _preset: { value: options, configurable: true },
+    _state: { value: state, configurable: true },
+    name: { value: 'log', configurable: true }
+  })
+}
+
+function nextColour () {
+  const clr = colours.shift();
+  colours.push(clr);
+  return clr
+}
+
+function fixup (log) {
+  const p = log._preset;
+  Object.assign(log, {
+    status: logger(merge(p, { newline: false, limitWidth: true })),
+    level: level => fixup(logger(merge(p, { level }))),
+    colour: colour =>
+      fixup(logger(merge(p, { colour: colour || nextColour() }))),
+    prefix: prefix => fixup(logger(merge(p, { prefix }))),
+    ...colourFuncs
+  });
+  return log
+}
+
+const log = fixup(logger({}));
 
 const reporter = new EventEmitter();
 const { green, cyan } = log;
@@ -535,8 +526,8 @@ reporter
         [
           comma(bytes).padStart(1 + comma(total).length),
           `${percent.toString().padStart(3)}%`,
-          `time ${ms(taken)}`,
-          `eta ${eta < 1000 ? '0s' : ms(eta)}`,
+          `time ${format$1(taken)}`,
+          `eta ${eta < 1000 ? '0s' : format$1(eta)}`,
           `rate ${fmtSize(speed)}B/s`
         ].join(' ')
       );
@@ -548,7 +539,7 @@ reporter
         [
           ` ${comma(bytes)} bytes`,
           direction,
-          `in ${ms(taken, { long: true })}`,
+          `in ${format$1(taken, true)}`,
           `at ${fmtSize((bytes * 1e3) / taken)}B/s`
         ].join(' ')
       )
@@ -567,7 +558,7 @@ reporter
   .on('delete.file.done', path => log(`${path} - deleted`))
   .on('retry', ({ delay, error }) => {
     console.error(
-      `\nError occured: ${error.message}\nWaiting ${ms(delay)} to retry...`
+      `\nError occured: ${error.message}\nWaiting ${format$1(delay)} to retry...`
     );
   })
   .on('stat.start', url => log(url + '\n'))
@@ -931,6 +922,10 @@ class Database {
         throw err
       }
     }
+  }
+
+  static _reset () {
+    client = undefined;
   }
 }
 
@@ -1380,7 +1375,7 @@ async function rm (url) {
 }
 
 const prog = sade('s3cli');
-const version = '1.5.0';
+const version = '1.5.1';
 
 prog.version(version);
 
