@@ -1,5 +1,5 @@
 import EventEmitter from 'events'
-import ms from 'ms'
+import { format } from '@lukeed/ms'
 import tinydate from 'tinydate'
 
 import log from 'logjs'
@@ -47,8 +47,8 @@ reporter
         [
           comma(bytes).padStart(1 + comma(total).length),
           `${percent.toString().padStart(3)}%`,
-          `time ${ms(taken)}`,
-          `eta ${eta < 1000 ? '0s' : ms(eta)}`,
+          `time ${format(taken)}`,
+          `eta ${eta < 1000 ? '0s' : format(eta)}`,
           `rate ${fmtSize(speed)}B/s`
         ].join(' ')
       )
@@ -60,7 +60,7 @@ reporter
         [
           ` ${comma(bytes)} bytes`,
           direction,
-          `in ${ms(taken, { long: true })}`,
+          `in ${format(taken, true)}`,
           `at ${fmtSize((bytes * 1e3) / taken)}B/s`
         ].join(' ')
       )
@@ -79,7 +79,7 @@ reporter
   .on('delete.file.done', path => log(`${path} - deleted`))
   .on('retry', ({ delay, error }) => {
     console.error(
-      `\nError occured: ${error.message}\nWaiting ${ms(delay)} to retry...`
+      `\nError occured: ${error.message}\nWaiting ${format(delay)} to retry...`
     )
   })
   .on('stat.start', url => log(url + '\n'))

@@ -7,7 +7,8 @@ export default {
     'fs/promises',
     'stream/promises',
     'sade',
-    'ms',
+    '@lukeed/ms',
+    'kleur/colors',
     'aws-sdk',
     'mime',
     'tinydate'

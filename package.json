@@ -21,10 +21,10 @@
   },
   "homepage": "https://github.com/ludlovian/s3cli#readme",
   "dependencies": {
+    "@lukeed/ms": "^2.0.0",
     "filescan": "github:ludlovian/filescan",
     "jsdbd": "github:ludlovian/jsdbd",
     "logjs": "github:ludlovian/logjs",
-    "ms": "^2.1.2",
     "promise-goodies": "github:ludlovian/promise-goodies",
     "retry": "github:ludlovian/retry",
     "s3js": "github:ludlovian/s3js",
