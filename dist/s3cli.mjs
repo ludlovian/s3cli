@@ -2,9 +2,10 @@
 import sade from 'sade';
 import { createReadStream, createWriteStream } from 'fs';
 import { stat as stat$2, chmod, utimes, lstat, readdir, realpath, unlink } from 'fs/promises';
-import { finished, pipeline } from 'stream/promises';
+import { PassThrough } from 'stream';
+import { pipeline } from 'stream/promises';
 import AWS from 'aws-sdk';
-import { Transform } from 'stream';
+import assert from 'assert/strict';
 import crypto, { createHash } from 'crypto';
 import mime from 'mime';
 import { extname, resolve, join, relative } from 'path';
@@ -12,160 +13,138 @@ import EventEmitter from 'events';
 import { format as format$1 } from '@lukeed/ms';
 import tinydate from 'tinydate';
 import { format } from 'util';
-import { red, green as green$1, yellow, blue, magenta, cyan as cyan$1, grey } from 'kleur/colors';
+import { cyan as cyan$1, green as green$1, yellow, blue, magenta, red } from 'kleur/colors';
 import { request } from 'http';
 import 'net';
 
-// throttler
-//
-// creates a rate-throttling stream
-//
-// throttling is performed by passing the stream through, and once a "chunk"
-// of data has been reached, then assessing if the last bit of that chunk
-// has arrived too early, and delaying if so.
-//
-// The rate is specified in bytes-per-second (with 'k' or 'm' suffixes meaning
-// KiB or MiB). By default, the chunk size is taken to be maximum amount
-// permitted in 100ms. The determination over whether it is too early uses
-// a sliding window of chunk completion times - by default the window
-// is 30 chunks (3 seconds at 100ms)
+function speedo ({
+  total,
+  interval = 250,
+  windowSize = 40
+} = {}) {
+  let readings;
+  let start;
+  return Object.assign(transform, { current: 0, total, update, done: false })
 
-class Throttler extends Transform {
-  constructor (options) {
-    if (typeof options !== 'object') options = { rate: options };
-    super(options);
-    const {
-      rate,
-      chunkTime = 100, // at max speed, how big is a chunk (in ms)
-      windowSize = 30 // how many chunks in the window
-    } = options;
-    const bytesPerSecond = ensureNumber(rate);
-    Object.assign(this, {
-      bytesPerSecond,
-      chunkSize: Math.max(1, Math.ceil((bytesPerSecond * chunkTime) / 1e3)),
-      chunkBytes: 0,
-      totalBytes: 0,
-      windowSize,
-      window: [[0, Date.now()]]
-    });
-    this.on('pipe', src => src.once('error', err => this.emit('error', err)));
+  async function * transform (source) {
+    start = Date.now();
+    readings = [[start, 0]];
+    const int = setInterval(update, interval);
+    try {
+      for await (const chunk of source) {
+        transform.current += chunk.length;
+        yield chunk;
+      }
+      transform.total = transform.current;
+      update(true);
+    } finally {
+      clearInterval(int);
+    }
   }
 
-  _transform (data, enc, callback) {
-    while (true) {
-      if (!data.length) return callback()
-      const chunk = data.slice(0, this.chunkSize - this.chunkBytes);
-      const rest = data.slice(chunk.length);
-      this.chunkBytes += chunk.length;
+  function update (done = false) {
+    if (transform.done) return
+    const { current, total } = transform;
+    const now = Date.now();
+    const taken = now - start;
+    readings = [...readings, [now, current]].slice(-windowSize);
+    const first = readings[0];
+    const wl = current - first[1];
+    const wt = now - first[0];
+    const rate = 1e3 * (done ? total / taken : wl / wt);
+    const percent = Math.round((100 * current) / total);
+    const eta = done || !total ? 0 : (1e3 * (total - current)) / rate;
+    Object.assign(transform, { done, taken, rate, percent, eta });
+  }
+}
 
-      // if we still do not have a full chunk, then just send it out
-      if (this.chunkBytes < this.chunkSize) {
-        // require('assert').strict.equal(rest.length, 0)
-        this.push(chunk);
-        return callback()
+function throttle (options) {
+  if (typeof options !== 'object') options = { rate: options };
+  const { chunkTime = 100, windowSize = 30 } = options;
+  const rate = getRate(options.rate);
+  return async function * throttle (source) {
+    let window = [[0, Date.now()]];
+    let bytes = 0;
+    let chunkBytes = 0;
+    const chunkSize = Math.max(1, Math.ceil((rate * chunkTime) / 1e3));
+    for await (let data of source) {
+      while (data.length) {
+        const chunk = data.slice(0, chunkSize - chunkBytes);
+        data = data.slice(chunk.length);
+        chunkBytes += chunk.length;
+        if (chunkBytes < chunkSize) {
+          assert.equal(data.length, 0);
+          yield chunk;
+          continue
+        }
+        bytes += chunkSize;
+        assert.equal(chunkBytes, chunkSize);
+        chunkBytes = 0;
+        const now = Date.now();
+        const first = window[0];
+        const eta = first[1] + (1e3 * (bytes - first[0])) / rate;
+        window = [...window, [bytes, Math.max(now, eta)]].slice(-windowSize);
+        if (now < eta) {
+          await delay(eta - now);
+        }
+        yield chunk;
       }
-
-      // we now have a full chunk
-      this.chunkBytes -= this.chunkSize;
-      this.totalBytes += this.chunkSize;
-      // require('assert').strict.equal(this.chunkBytes, 0)
-
-      // when should this chunk be going out?
-      const now = Date.now();
-      const [startBytes, startTime] = this.window[0];
-      const eta =
-        startTime + ((this.totalBytes - startBytes) * 1e3) / this.bytesPerSecond;
-
-      this.window = [
-        ...this.window,
-        [this.totalBytes, Math.max(now, eta)]
-      ].slice(-this.windowSize);
-
-      // are we too late - so just send out already - and come round again
-      if (now > eta) {
-        this.push(chunk);
-        data = rest;
-        continue
-      }
-
-      // so we are too early - so send it later
-      return setTimeout(() => {
-        this.push(chunk);
-        this._transform(rest, enc, callback);
-      }, eta - now)
     }
   }
 }
 
-function throttler (options) {
-  return new Throttler(options)
-}
-
-function ensureNumber (value) {
-  let n = (value + '').toLowerCase();
+function getRate (val) {
+  const n = (val + '').toLowerCase();
+  if (!/^\d+[mk]?$/.test(n)) throw new Error(`Invalid rate: ${val}`)
   const m = n.endsWith('m') ? 1024 * 1024 : n.endsWith('k') ? 1024 : 1;
-  n = parseInt(n.replace(/[mk]$/, ''));
-  if (isNaN(n)) throw new Error(`Cannot understand number "${value}"`)
-  return n * m
+  return parseInt(n) * m
 }
 
-function progress (opts = {}) {
-  const { onProgress, progressInterval, ...rest } = opts;
-  let interval;
-  let bytes = 0;
-  let done = false;
-  let error;
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-  const ts = new Transform({
-    transform (chunk, encoding, cb) {
-      bytes += chunk.length;
-      cb(null, chunk);
-    },
-    flush (cb) {
-      if (interval) clearInterval(interval);
+function progressStream ({
+  onProgress,
+  interval = 1000,
+  ...rest
+} = {}) {
+  return async function * transform (source) {
+    const int = setInterval(report, interval);
+    let bytes = 0;
+    let done = false;
+    try {
+      for await (const chunk of source) {
+        bytes += chunk.length;
+        yield chunk;
+      }
       done = true;
-      reportProgress();
-      cb(error);
+      report();
+    } finally {
+      clearInterval(int);
     }
-  });
 
-  if (progressInterval) {
-    interval = setInterval(reportProgress, progressInterval);
-  }
-  if (typeof onProgress === 'function') {
-    ts.on('progress', onProgress);
-  }
-
-  ts.on('pipe', src =>
-    src.on('error', err => {
-      error = error || err;
-      ts.emit('error', err);
-    })
-  );
-
-  return ts
-
-  function reportProgress () {
-    if (!error) ts.emit('progress', { bytes, done, ...rest });
+    function report () {
+      onProgress && onProgress({ bytes, done, ...rest });
+    }
   }
 }
 
-function hashStream (algo = 'md5', enc = 'hex') {
-  const hasher = createHash(algo);
-  const hs = new Transform({
-    transform (chunk, enc, cb) {
+function hashStream ({ algo = 'md5', enc = 'hex' } = {}) {
+  return async function * transform (source) {
+    const hasher = createHash(algo);
+    for await (const chunk of source) {
       hasher.update(chunk);
-      cb(null, chunk);
-    },
-    flush (cb) {
-      hs.hash = hasher.digest(enc);
-      cb();
+      yield chunk;
     }
-  });
-  // forward errors
-  hs.on('pipe', src => src.on('error', err => hs.emit('error', err)));
+    transform.hash = hasher.digest(enc);
+  }
+}
 
-  return hs
+async function hashFile$1 (filename, { algo = 'md5', enc = 'hex' } = {}) {
+  const hasher = createHash(algo);
+  for await (const chunk of createReadStream(filename)) {
+    hasher.update(chunk);
+  }
+  return hasher.digest(enc)
 }
 
 async function getFileMetadata (file) {
@@ -191,14 +170,7 @@ async function getFileMetadata (file) {
   }
 }
 
-async function getLocalHash (file) {
-  const hs = hashStream();
-  createReadStream(file).pipe(hs);
-  // start consuming data
-  hs.resume();
-  await finished(hs);
-  return hs.hash
-}
+const getLocalHash = hashFile$1;
 
 function once$1 (fn) {
   let called = false;
@@ -310,7 +282,7 @@ async function stat$1 (url) {
 
 async function upload$1 (file, url, opts = {}) {
   const { Bucket, Key } = parseAddress(url);
-  const { onProgress, progressInterval = 1000, limit } = opts;
+  const { onProgress, interval = 1000, limit } = opts;
 
   const s3 = await getS3();
   const {
@@ -319,21 +291,19 @@ async function upload$1 (file, url, opts = {}) {
     ...metadata
   } = await getFileMetadata(file);
 
-  let Body = createReadStream(file);
+  // streams
+  const speedo$1 = speedo({ total: ContentLength });
+  const Body = new PassThrough();
 
-  // rate limiter
-  if (limit) Body = Body.pipe(throttler(limit));
-
-  // progress
-  if (onProgress) {
-    Body = Body.pipe(
-      progress({
-        onProgress,
-        progressInterval,
-        total: ContentLength
-      })
-    );
-  }
+  const pPipeline = pipeline(
+    ...[
+      createReadStream(file),
+      limit && throttle(limit),
+      onProgress && speedo$1,
+      onProgress && progressStream({ onProgress, interval, speedo: speedo$1 }),
+      Body
+    ].filter(Boolean)
+  );
 
   const request = {
     Body,
@@ -346,7 +316,11 @@ async function upload$1 (file, url, opts = {}) {
   };
 
   // perform the upload
-  const { ETag } = await s3.putObject(request).promise();
+  const pUpload = s3.putObject(request).promise();
+
+  // wait for everything to finish
+  await Promise.all([pPipeline, pUpload]);
+  const { ETag } = await pUpload;
 
   // check the etag is the md5 of the source data
   /* c8 ignore next 3 */
@@ -360,7 +334,7 @@ async function upload$1 (file, url, opts = {}) {
 // download an S3 object to a file, with progress and/or rate limiting
 //
 async function download$1 (url, dest, opts = {}) {
-  const { onProgress, progressInterval = 1000, limit } = opts;
+  const { onProgress, interval = 1000, limit } = opts;
   const { Bucket, Key } = parseAddress(url);
 
   const s3 = await getS3();
@@ -371,21 +345,13 @@ async function download$1 (url, dest, opts = {}) {
   const hash = md5 || (!ETag.includes('-') && ETag.replace(/"/g, ''));
 
   const hasher = hashStream();
+  const speedo$1 = speedo({ total });
   const streams = [
-    // the source read steam
     s3.getObject({ Bucket, Key }).createReadStream(),
-
-    // hasher
     hasher,
-
-    // rate limiter
-    /* c8 ignore next */
-    limit && throttler(limit),
-
-    // progress monitor
-    onProgress && progress({ onProgress, progressInterval, total }),
-
-    // output
+    limit && throttle(limit),
+    onProgress && speedo$1,
+    onProgress && progressStream({ onProgress, interval, speedo: speedo$1 }),
     createWriteStream(dest)
   ].filter(Boolean);
 
@@ -407,7 +373,7 @@ async function deleteObject (url, opts = {}) {
   await s3.deleteObject(request).promise();
 }
 
-const colourFuncs = { red, green: green$1, yellow, blue, magenta, cyan: cyan$1, grey };
+const colourFuncs = { cyan: cyan$1, green: green$1, yellow, blue, magenta, red };
 const colours = Object.keys(colourFuncs);
 const CLEAR_LINE = '\r\x1b[0K';
 const RE_DECOLOR = /(^|[^\x1b]*)((?:\x1b\[\d*m)|$)/g; // eslint-disable-line no-control-regex
@@ -636,104 +602,39 @@ const STORAGE_CLASS = {
   DEEP_ARCHIVE: 'D'
 };
 
-class Speedo {
-  // Units:
-  //  curr / total - things
-  //  rate - things per second
-  //  eta / taken - ms
-  constructor ({ window = 10 } = {}) {
-    this.windowSize = window;
-    this.start = Date.now();
-    this.readings = [[this.start, 0]];
-  }
-
-  update (data) {
-    if (typeof data === 'number') data = { current: data };
-    const { current, total } = data;
-    if (total) this.total = total;
-    this.readings = [...this.readings, [Date.now(), current]].slice(
-      -this.windowSize
-    );
-    this.current = current;
-  }
-
-  get done () {
-    return this.total && this.current >= this.total
-  }
-
-  rate () {
-    if (this.readings.length < 2) return 0
-    if (this.done) return (this.current * 1e3) / this.taken()
-    const last = this.readings[this.readings.length - 1];
-    const first = this.readings[0];
-    return ((last[1] - first[1]) * 1e3) / (last[0] - first[0])
-  }
-
-  percent () {
-    if (!this.total) return null
-    return this.done ? 100 : Math.round((100 * this.current) / this.total)
-  }
-
-  eta () {
-    if (!this.total || this.done) return 0
-    const rate = this.rate();
-    /* c8 ignore next */
-    if (!rate) return 0
-    return (1e3 * (this.total - this.current)) / rate
-  }
-
-  taken () {
-    return this.readings[this.readings.length - 1][0] - this.start
-  }
-}
-
 function upload (file, url, { progress, limit }) {
   return upload$1(file, url, {
-    onProgress: progress ? doProgress$1(url) : undefined,
+    onProgress: !!progress && doProgress$1(url),
     limit
   })
 }
 
 function doProgress$1 (url) {
   report('file.transfer.start', url);
-  const speedo = new Speedo();
   const direction = 'uploaded';
-  return ({ bytes, total, done }) => {
-    speedo.update({ current: bytes, total });
-    report(`file.transfer.${done ? 'done' : 'update'}`, {
-      bytes,
-      percent: speedo.percent(),
-      total,
-      taken: speedo.taken(),
-      eta: speedo.eta(),
-      speed: speedo.rate(),
-      direction
-    });
+  return data => {
+    const { bytes, done, speedo } = data;
+    const { percent, total, taken, eta, rate: speed } = speedo;
+    const payload = { bytes, percent, total, taken, eta, speed, direction };
+    report(`file.transfer.${done ? 'done' : 'update'}`, payload);
   }
 }
 
 function download (url, file, { progress, limit }) {
   return download$1(url, file, {
-    onProgress: progress ? doProgress(file) : undefined,
+    onProgress: !!progress && doProgress(file),
     limit
   })
 }
 
 function doProgress (dest) {
   report('file.transfer.start', resolve(dest));
-  const speedo = new Speedo();
   const direction = 'downloaded';
-  return ({ bytes, total, done }) => {
-    speedo.update({ current: bytes, total });
-    report(`file.transfer.${done ? 'done' : 'update'}`, {
-      bytes,
-      percent: speedo.percent(),
-      total,
-      taken: speedo.taken(),
-      eta: speedo.eta(),
-      speed: speedo.rate(),
-      direction
-    });
+  return data => {
+    const { bytes, done, speedo } = data;
+    const { total, percent, eta, taken, rate: speed } = speedo;
+    const payload = { bytes, percent, total, taken, eta, speed, direction };
+    report(`file.transfer.${done ? 'done' : 'update'}`, payload);
   }
 }
 
@@ -1375,7 +1276,7 @@ async function rm (url) {
 }
 
 const prog = sade('s3cli');
-const version = '1.5.1';
+const version = '1.6.0';
 
 prog.version(version);
 
