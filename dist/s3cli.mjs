@@ -5,7 +5,6 @@ import { stat as stat$2, chmod, utimes, lstat, readdir, realpath, unlink } from 
 import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 import AWS from 'aws-sdk';
-import assert from 'assert/strict';
 import crypto, { createHash } from 'crypto';
 import mime from 'mime';
 import { extname, resolve, join, relative } from 'path';
@@ -58,6 +57,7 @@ function speedo ({
   }
 }
 
+// import assert from 'assert/strict'
 function throttle (options) {
   if (typeof options !== 'object') options = { rate: options };
   const { chunkTime = 100, windowSize = 30 } = options;
@@ -73,12 +73,12 @@ function throttle (options) {
         data = data.slice(chunk.length);
         chunkBytes += chunk.length;
         if (chunkBytes < chunkSize) {
-          assert.equal(data.length, 0);
+          // assert.equal(data.length, 0)
           yield chunk;
           continue
         }
         bytes += chunkSize;
-        assert.equal(chunkBytes, chunkSize);
+        // assert.equal(chunkBytes, chunkSize)
         chunkBytes = 0;
         const now = Date.now();
         const first = window[0];
