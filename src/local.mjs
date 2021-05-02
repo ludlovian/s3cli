@@ -4,7 +4,7 @@ import { stat, realpath } from 'fs/promises'
 import { createReadStream } from 'fs'
 import { resolve, relative } from 'path'
 
-import Database from 'jsdbd'
+import Database from 'jsdb'
 import filescan from 'filescan'
 
 import { once } from './util.mjs'
@@ -55,7 +55,6 @@ export default class Local extends EventEmitter {
 
 const getDB = once(async () => {
   const db = new Database('file_md5_cache.db')
-  await db.check()
   await db.ensureIndex({ fieldName: 'path', unique: true })
   return db
 })

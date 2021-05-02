@@ -23,7 +23,7 @@
   "dependencies": {
     "@lukeed/ms": "^2.0.0",
     "filescan": "github:ludlovian/filescan",
-    "jsdbd": "github:ludlovian/jsdbd",
+    "jsdb": "github:ludlovian/jsdb#semver:^3.1.0",
     "logjs": "github:ludlovian/logjs",
     "retry": "github:ludlovian/retry",
     "s3js": "github:ludlovian/s3js",

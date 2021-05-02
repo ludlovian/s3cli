@@ -1,7 +1,7 @@
 import EventEmitter from 'events'
 import { relative } from 'path'
 
-import Database from 'jsdbd'
+import Database from 'jsdb'
 import { parseAddress as s3parse, scan as s3scan, stat as s3stat } from 's3js'
 
 import { once } from './util.mjs'
@@ -57,7 +57,6 @@ export default class Remote extends EventEmitter {
 
 const getDB = once(async () => {
   const db = new Database('s3file_md5_cache.db')
-  await db.check()
   await db.ensureIndex({ fieldName: 'url', unique: true })
   return db
 })

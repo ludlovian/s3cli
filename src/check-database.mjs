@@ -1,7 +1,7 @@
 import { stat } from 'fs/promises'
 
 import promiseGoodies from 'promise-goodies'
-import Database from 'jsdbd'
+import Database from 'jsdb'
 import { stat as s3stat } from 's3js'
 
 const dryrun = process.argv.includes('-n')
@@ -34,6 +34,7 @@ async function checkFiles () {
 async function checkS3Files () {
   console.log('scanning s3 objects...')
   const db = new Database('s3file_md5_cache.db')
+  await db.load()
   const recs = await db.getAll()
   await Promise.map(recs, checkObject, { concurrency: 10 })
   await db.compact({ sorted: 'url' })

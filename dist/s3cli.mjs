@@ -1,20 +1,19 @@
 #!/usr/bin/env node
 import sade from 'sade';
-import { createReadStream, createWriteStream } from 'fs';
-import { stat as stat$2, chmod, utimes, lstat, readdir, realpath, unlink } from 'fs/promises';
+import { createReadStream, createWriteStream, unlinkSync } from 'fs';
+import { stat as stat$2, chmod, utimes, symlink, readFile, open, rename, appendFile, lstat, readdir, realpath, unlink } from 'fs/promises';
 import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 import AWS from 'aws-sdk';
 import crypto, { createHash } from 'crypto';
 import mime from 'mime';
-import { extname, resolve, join, relative } from 'path';
+import { extname, resolve, basename, join, relative } from 'path';
 import EventEmitter from 'events';
 import { format as format$1 } from '@lukeed/ms';
 import tinydate from 'tinydate';
 import { format } from 'util';
 import { cyan as cyan$1, green as green$1, yellow, blue, magenta, red } from 'kleur/colors';
-import { request } from 'http';
-import 'net';
+import { homedir } from 'os';
 
 function speedo ({
   total,
@@ -664,184 +663,554 @@ retry.exponential = x => n => Math.round(n * x);
 
 const sleep = delay => new Promise(resolve => setTimeout(resolve, delay));
 
-function deserialize (obj) {
-  if (Array.isArray(obj)) return Object.freeze(obj.map(deserialize))
-  if (obj === null || typeof obj !== 'object') return obj
-  if ('$$date$$' in obj) return Object.freeze(new Date(obj.$$date$$))
-  if ('$$undefined$$' in obj) return undefined
-  return Object.freeze(
-    Object.entries(obj).reduce(
-      (o, [k, v]) => ({ ...o, [k]: deserialize(v) }),
-      {}
-    )
-  )
+class DatastoreError extends Error {
+  constructor (name, message) {
+    super(message);
+    this.name = name;
+    Error.captureStackTrace(this, this.constructor);
+  }
 }
 
-function serialize (obj) {
-  if (Array.isArray(obj)) return obj.map(serialize)
-  if (obj === undefined) return { $$undefined$$: true }
-  if (obj instanceof Date) return { $$date$$: obj.getTime() }
-  if (obj === null || typeof obj !== 'object') return obj
-  return Object.entries(obj).reduce(
-    (o, [k, v]) => ({ ...o, [k]: serialize(v) }),
-    {}
-  )
+class DatabaseLocked extends DatastoreError {
+  constructor (filename) {
+    super('DatabaseLocked', 'Database is locked');
+    this.filename = filename;
+  }
 }
 
-const jsonrpc = '2.0';
+class KeyViolation extends DatastoreError {
+  constructor (doc, fieldName) {
+    super('KeyViolation', 'Key violation error');
+    this.fieldName = fieldName;
+    this.record = doc;
+  }
+}
 
-const knownErrors = {};
+class NotExists extends DatastoreError {
+  constructor (doc) {
+    super('NotExists', 'Record does not exist');
+    this.record = doc;
+  }
+}
 
-class RpcClient {
-  constructor (options) {
-    this.options = options;
+class NoIndex extends DatastoreError {
+  constructor (fieldName) {
+    super('NoIndex', 'No such index');
+    this.fieldName = fieldName;
+  }
+}
+
+class PLock {
+  constructor ({ width = 1 } = {}) {
+    this.width = width;
+    this.count = 0;
+    this.awaiters = [];
   }
 
-  async call (method, ...params) {
-    const body = JSON.stringify({
-      jsonrpc,
-      method,
-      params: serialize(params)
-    });
-
-    const options = {
-      ...this.options,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json;charset=utf-8',
-        'Content-Length': Buffer.byteLength(body),
-        Connection: 'keep-alive'
-      }
-    };
-    const res = await makeRequest(options, body);
-    const data = await readResponse(res);
-
-    if (data.error) {
-      const errDetails = deserialize(data.error);
-      const Factory = RpcClient.error(errDetails.name);
-      throw new Factory(errDetails)
+  acquire () {
+    if (this.count < this.width) {
+      this.count++;
+      return Promise.resolve()
     }
-
-    return deserialize(data.result)
+    return new Promise(resolve => this.awaiters.push(resolve))
   }
 
-  static error (name) {
-    let constructor = knownErrors[name];
-    if (constructor) return constructor
-    constructor = makeErrorClass(name);
-    knownErrors[name] = constructor;
-    return constructor
+  release () {
+    if (!this.count) return
+    if (this.waiting) {
+      this.awaiters.shift()();
+    } else {
+      this.count--;
+    }
+  }
+
+  get waiting () {
+    return this.awaiters.length
+  }
+
+  async exec (fn) {
+    try {
+      await this.acquire();
+      return await Promise.resolve(fn())
+    } finally {
+      this.release();
+    }
   }
 }
 
-function makeRequest (options, body) {
-  return new Promise((resolve, reject) => {
-    const req = request(options, resolve);
-    req.once('error', reject);
-    req.write(body);
-    req.end();
+function delve (obj, key) {
+  let p = 0;
+  key = key.split('.');
+  while (obj && p < key.length) {
+    obj = obj[key[p++]];
+  }
+  return obj === undefined || p < key.length ? undefined : obj
+}
+
+function getId (row, existing) {
+  // generate a repeatable for this row, avoiding conflicts with the other rows
+  const start = hashString(stringify(row));
+  for (let n = 0; n < 1e8; n++) {
+    const id = ((start + n) & 0x7fffffff).toString(36);
+    if (!existing.has(id)) return id
+  }
+  /* c8 ignore next */
+  throw new Error('Could not generate unique id')
+}
+
+function hashString (string) {
+  return Array.from(string).reduce(
+    (h, ch) => ((h << 5) - h + ch.charCodeAt(0)) & 0xffffffff,
+    0
+  )
+}
+
+function cleanObject (obj) {
+  return Object.entries(obj).reduce((o, [k, v]) => {
+    if (v !== undefined) o[k] = v;
+    return o
+  }, {})
+}
+
+const DATE_SENTINEL = '$date';
+
+function stringify (obj) {
+  return JSON.stringify(obj, function (k, v) {
+    return this[k] instanceof Date
+      ? { [DATE_SENTINEL]: this[k].toISOString() }
+      : v
   })
 }
 
-async function readResponse (res) {
-  res.setEncoding('utf8');
-  let data = '';
-  for await (const chunk of res) {
-    data += chunk;
-  }
-  return JSON.parse(data)
+function parse (s) {
+  return JSON.parse(s, function (k, v) {
+    if (k === DATE_SENTINEL) return new Date(v)
+    if (typeof v === 'object' && DATE_SENTINEL in v) return v[DATE_SENTINEL]
+    return v
+  })
 }
 
-function makeErrorClass (name) {
-  function fn (data) {
-    const { name, ...rest } = data;
-    Error.call(this);
-    Error.captureStackTrace(this, this.constructor);
-    Object.assign(this, rest);
+function sortOn (selector) {
+  if (typeof selector !== 'function') {
+    const key = selector;
+    selector = x => delve(x, key);
   }
-
-  // reset the name of the constructor
-  Object.defineProperties(fn, {
-    name: { value: name, configurable: true }
-  });
-
-  // make it inherit from error
-  fn.prototype = Object.create(Error.prototype, {
-    name: { value: name, configurable: true },
-    constructor: { value: fn, configurable: true }
-  });
-
-  return fn
+  return (a, b) => {
+    const x = selector(a);
+    const y = selector(b);
+    /* c8 ignore next */
+    return x < y ? -1 : x > y ? 1 : 0
+  }
 }
 
-const jsdbMethods = new Set([
-  'ensureIndex',
-  'deleteIndex',
-  'insert',
-  'update',
-  'upsert',
-  'delete',
-  'find',
-  'findOne',
-  'getAll',
-  'compact',
-  'reload'
-]);
+// Indexes are maps between values and docs
+//
+// Generic index is many-to-many
+// Unique index is many values to single doc
+// Sparse indexes do not index null-ish values
+//
+class Index {
+  static create (options) {
+    return new (options.unique ? UniqueIndex : Index)(options)
+  }
 
-const jsdbErrors = new Set(['KeyViolation', 'NotExists', 'NoIndex']);
-
-let client;
-
-const staticMethods = ['status', 'housekeep', 'clear', 'shutdown'];
-
-class Database {
-  constructor (opts) {
-    /* c8 ignore next 2 */
-    if (typeof opts === 'string') opts = { filename: opts };
-    const { port = 39720, ...options } = opts;
+  constructor (options) {
     this.options = options;
-    if (!client) {
-      client = new RpcClient({ port });
-      for (const method of staticMethods) {
-        Database[method] = client.call.bind(client, method);
-      }
-    }
-    const { filename } = this.options;
-    for (const method of jsdbMethods.values()) {
-      this[method] = client.call.bind(client, 'dispatch', filename, method);
+    this.data = new Map();
+  }
+
+  find (value) {
+    const docs = this.data.get(value);
+    return docs ? Array.from(docs) : []
+  }
+
+  findOne (value) {
+    const docs = this.data.get(value);
+    return docs ? docs.values().next().value : undefined
+  }
+
+  addDoc (doc) {
+    const value = delve(doc, this.options.fieldName);
+    if (Array.isArray(value)) {
+      value.forEach(v => this.linkValueToDoc(v, doc));
+    } else {
+      this.linkValueToDoc(value, doc);
     }
   }
 
-  async check () {
+  removeDoc (doc) {
+    const value = delve(doc, this.options.fieldName);
+    if (Array.isArray(value)) {
+      value.forEach(v => this.unlinkValueFromDoc(v, doc));
+    } else {
+      this.unlinkValueFromDoc(value, doc);
+    }
+  }
+
+  linkValueToDoc (value, doc) {
+    if (value == null && this.options.sparse) return
+    const docs = this.data.get(value);
+    if (docs) {
+      docs.add(doc);
+    } else {
+      this.data.set(value, new Set([doc]));
+    }
+  }
+
+  unlinkValueFromDoc (value, doc) {
+    const docs = this.data.get(value);
+    if (!docs) return
+    docs.delete(doc);
+    if (!docs.size) this.data.delete(value);
+  }
+}
+
+class UniqueIndex extends Index {
+  findOne (value) {
+    return this.data.get(value)
+  }
+
+  find (value) {
+    return this.findOne(value)
+  }
+
+  linkValueToDoc (value, doc) {
+    if (value == null && this.options.sparse) return
+    if (this.data.has(value)) {
+      throw new KeyViolation(doc, this.options.fieldName)
+    }
+    this.data.set(value, doc);
+  }
+
+  unlinkValueFromDoc (value, doc) {
+    if (this.data.get(value) === doc) this.data.delete(value);
+  }
+}
+
+const lockfiles = new Set();
+
+async function lockFile (filename) {
+  const lockfile = filename + '.lock~';
+  const target = basename(filename);
+  try {
+    await symlink(target, lockfile);
+    lockfiles.add(lockfile);
+  } catch (err) {
+    /* c8 ignore next */
+    if (err.code !== 'EEXIST') throw err
+    throw new DatabaseLocked(filename)
+  }
+}
+
+function cleanup () {
+  lockfiles.forEach(file => {
     try {
-      await client.call('status');
-      /* c8 ignore next 6 */
-    } catch (err) {
-      if (err.code === 'ECONNREFUSED') {
-        throw new NoServer(err)
+      unlinkSync(file);
+    } catch {
+      // pass
+    }
+  });
+}
+
+process
+  .on('exit', cleanup)
+  .on('SIGINT', cleanup)
+  .on('SIGTERM', cleanup);
+
+class Datastore {
+  constructor (options) {
+    this.options = {
+      serialize: stringify,
+      deserialize: parse,
+      special: {
+        deleted: '$$deleted',
+        addIndex: '$$addIndex',
+        deleteIndex: '$$deleteIndex'
+      },
+      ...options
+    };
+
+    this.lock = new PLock();
+    this.lock.acquire();
+    this.loaded = false;
+    this.empty();
+  }
+
+  // API from Database class - mostly async
+
+  async exec (fn) {
+    const pItem = this.lock.exec(fn);
+    if (!this.loaded) {
+      this.loaded = true;
+      await lockFile(this.options.filename);
+      await this.hydrate();
+      await this.rewrite();
+      this.lock.release();
+    }
+    return await pItem
+  }
+
+  async ensureIndex (options) {
+    const { fieldName } = options;
+    const { addIndex } = this.options.special;
+    if (this.hasIndex(fieldName)) return
+    this.addIndex(options);
+    await this.append([{ [addIndex]: options }]);
+  }
+
+  async deleteIndex (fieldName) {
+    const { deleteIndex } = this.options.special;
+    if (fieldName === '_id') return
+    if (!this.hasIndex(fieldName)) throw new NoIndex(fieldName)
+    this.removeIndex(fieldName);
+    await this.append([{ [deleteIndex]: { fieldName } }]);
+  }
+
+  find (fieldName, value) {
+    if (!this.hasIndex(fieldName)) throw new NoIndex(fieldName)
+    return this.indexes[fieldName].find(value)
+  }
+
+  findOne (fieldName, value) {
+    if (!this.hasIndex(fieldName)) throw new NoIndex(fieldName)
+    return this.indexes[fieldName].findOne(value)
+  }
+
+  allDocs () {
+    return Array.from(this.indexes._id.data.values())
+  }
+
+  async upsert (docOrDocs, options) {
+    let ret;
+    let docs;
+    if (Array.isArray(docOrDocs)) {
+      ret = docOrDocs.map(doc => this.addDoc(doc, options));
+      docs = ret;
+    } else {
+      ret = this.addDoc(docOrDocs, options);
+      docs = [ret];
+    }
+    await this.append(docs);
+    return ret
+  }
+
+  async delete (docOrDocs) {
+    let ret;
+    let docs;
+    const { deleted } = this.options.special;
+    if (Array.isArray(docOrDocs)) {
+      ret = docOrDocs.map(doc => this.removeDoc(doc));
+      docs = ret;
+    } else {
+      ret = this.removeDoc(docOrDocs);
+      docs = [ret];
+    }
+    docs = docs.map(doc => ({ [deleted]: doc }));
+    await this.append(docs);
+    return ret
+  }
+
+  async hydrate () {
+    const {
+      filename,
+      deserialize,
+      special: { deleted, addIndex, deleteIndex }
+    } = this.options;
+
+    const data = await readFile(filename, { encoding: 'utf8', flag: 'a+' });
+
+    this.empty();
+    for (const line of data.split(/\n/).filter(Boolean)) {
+      const doc = deserialize(line);
+      if (addIndex in doc) {
+        this.addIndex(doc[addIndex]);
+      } else if (deleteIndex in doc) {
+        this.deleteIndex(doc[deleteIndex].fieldName);
+      } else if (deleted in doc) {
+        this.removeDoc(doc[deleted]);
       } else {
-        throw err
+        this.addDoc(doc);
       }
     }
   }
 
-  static _reset () {
-    client = undefined;
+  async rewrite ({ sorted = false } = {}) {
+    const {
+      filename,
+      serialize,
+      special: { addIndex }
+    } = this.options;
+    const temp = filename + '~';
+    const docs = this.allDocs();
+    if (sorted) {
+      if (typeof sorted !== 'string' && typeof sorted !== 'function') {
+        sorted = '_id';
+      }
+      docs.sort(sortOn(sorted));
+    }
+    const lines = Object.values(this.indexes)
+      .filter(ix => ix.options.fieldName !== '_id')
+      .map(ix => ({ [addIndex]: ix.options }))
+      .concat(docs)
+      .map(doc => serialize(doc) + '\n');
+    const fh = await open(temp, 'w');
+    await fh.writeFile(lines.join(''), 'utf8');
+    await fh.sync();
+    await fh.close();
+    await rename(temp, filename);
+  }
+
+  async append (docs) {
+    const { filename, serialize } = this.options;
+    const lines = docs.map(doc => serialize(doc) + '\n').join('');
+    await appendFile(filename, lines, 'utf8');
+  }
+
+  // Internal methods - mostly sync
+
+  empty () {
+    this.indexes = {
+      _id: Index.create({ fieldName: '_id', unique: true })
+    };
+  }
+
+  addIndex (options) {
+    const { fieldName } = options;
+    const ix = Index.create(options);
+    this.allDocs().forEach(doc => ix.addDoc(doc));
+    this.indexes[fieldName] = ix;
+  }
+
+  removeIndex (fieldName) {
+    delete this.indexes[fieldName];
+  }
+
+  hasIndex (fieldName) {
+    return Boolean(this.indexes[fieldName])
+  }
+
+  addDoc (doc, { mustExist = false, mustNotExist = false } = {}) {
+    const { _id, ...rest } = doc;
+    const olddoc = this.indexes._id.findOne(_id);
+    if (!olddoc && mustExist) throw new NotExists(doc)
+    if (olddoc && mustNotExist) throw new KeyViolation(doc, '_id')
+
+    doc = {
+      _id: _id || getId(doc, this.indexes._id.data),
+      ...cleanObject(rest)
+    };
+    Object.freeze(doc);
+
+    const ixs = Object.values(this.indexes);
+    try {
+      ixs.forEach(ix => {
+        if (olddoc) ix.removeDoc(olddoc);
+        ix.addDoc(doc);
+      });
+      return doc
+    } catch (err) {
+      // to rollback, we remove the new doc from each index. If there is
+      // an old one, then we remove that (just in case) and re-add
+      ixs.forEach(ix => {
+        ix.removeDoc(doc);
+        if (olddoc) {
+          ix.removeDoc(olddoc);
+          ix.addDoc(olddoc);
+        }
+      });
+      throw err
+    }
+  }
+
+  removeDoc (doc) {
+    const ixs = Object.values(this.indexes);
+    const olddoc = this.indexes._id.findOne(doc._id);
+    if (!olddoc) throw new NotExists(doc)
+    ixs.forEach(ix => ix.removeDoc(olddoc));
+    return olddoc
   }
 }
 
-class NoServer extends Error {
-  constructor (err) {
-    super('Could not find jsdbd');
-    Object.assign(this, err, { client });
+// Database
+//
+// The public API of a jsdb database
+//
+class Database {
+  constructor (filename) {
+    if (!filename || typeof filename !== 'string') {
+      throw new TypeError('Bad filename')
+    }
+    filename = resolve(join(homedir(), '.databases'), filename);
+    const ds = new Datastore({ filename });
+    Object.defineProperties(this, {
+      _ds: { value: ds, configurable: true },
+      _autoCompaction: { configurable: true, writable: true }
+    });
+  }
+
+  load () {
+    return this.reload()
+  }
+
+  reload () {
+    return this._ds.exec(() => this._ds.hydrate())
+  }
+
+  compact (opts) {
+    return this._ds.exec(() => this._ds.rewrite(opts))
+  }
+
+  ensureIndex (options) {
+    return this._ds.exec(() => this._ds.ensureIndex(options))
+  }
+
+  deleteIndex (fieldName) {
+    return this._ds.exec(() => this._ds.deleteIndex(fieldName))
+  }
+
+  insert (docOrDocs) {
+    return this._ds.exec(() =>
+      this._ds.upsert(docOrDocs, { mustNotExist: true })
+    )
+  }
+
+  update (docOrDocs) {
+    return this._ds.exec(() => this._ds.upsert(docOrDocs, { mustExist: true }))
+  }
+
+  upsert (docOrDocs) {
+    return this._ds.exec(() => this._ds.upsert(docOrDocs))
+  }
+
+  delete (docOrDocs) {
+    return this._ds.exec(() => this._ds.delete(docOrDocs))
+  }
+
+  getAll () {
+    return this._ds.exec(async () => this._ds.allDocs())
+  }
+
+  find (fieldName, value) {
+    return this._ds.exec(async () => this._ds.find(fieldName, value))
+  }
+
+  findOne (fieldName, value) {
+    return this._ds.exec(async () => this._ds.findOne(fieldName, value))
+  }
+
+  setAutoCompaction (interval, opts) {
+    this.stopAutoCompaction();
+    this._autoCompaction = setInterval(() => this.compact(opts), interval);
+  }
+
+  stopAutoCompaction () {
+    if (!this._autoCompaction) return
+    clearInterval(this._autoCompaction);
+    this._autoCompaction = undefined;
   }
 }
 
-Database.NoServer = NoServer;
-
-jsdbErrors.forEach(name => {
-  Database[name] = RpcClient.error(name);
-});
+Object.assign(Database, { KeyViolation, NotExists, NoIndex, DatabaseLocked });
 
 async function * filescan (options) {
   if (typeof options === 'string') options = { path: options };
@@ -933,7 +1302,6 @@ class Local extends EventEmitter {
 
 const getDB$1 = once(async () => {
   const db = new Database('file_md5_cache.db');
-  await db.check();
   await db.ensureIndex({ fieldName: 'path', unique: true });
   return db
 });
@@ -998,7 +1366,6 @@ class Remote extends EventEmitter {
 
 const getDB = once(async () => {
   const db = new Database('s3file_md5_cache.db');
-  await db.check();
   await db.ensureIndex({ fieldName: 'url', unique: true });
   return db
 });
