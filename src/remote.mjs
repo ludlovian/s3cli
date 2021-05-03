@@ -1,21 +1,18 @@
 import EventEmitter from 'events'
 import { relative } from 'path'
 
-import Database from 'jsdb'
 import { parseAddress as s3parse, scan as s3scan, stat as s3stat } from 's3js'
 
-import { once } from './util.mjs'
+import { getDB } from './database.mjs'
+import { sortBy } from './util.mjs'
 
 export default class Remote extends EventEmitter {
   constructor (data) {
     super()
     Object.assign(this, data)
-    if (this.etag && !this.etag.includes('-')) {
-      this.hash = this.etag
-    }
   }
 
-  static async * scan (root, filter) {
+  static async * files (root, filter) {
     const { Bucket, Key: Prefix } = s3parse(root)
     for await (const data of s3scan(root + '/')) {
       const path = relative(Prefix, data.Key)
@@ -23,40 +20,45 @@ export default class Remote extends EventEmitter {
       yield new Remote({
         path,
         root,
-        url: `${Bucket}/${data.Key}`,
-        etag: data.ETag.replace(/"/g, '')
+        url: `s3://${Bucket}/${data.Key}`,
+        mtime: +data.LastModified,
+        size: data.Size
       })
     }
   }
 
-  async getHash () {
-    if (this.hash) return this.hash
+  static async * hashes (root, filter) {
+    const { Bucket, Key: Prefix } = s3parse(root)
     const db = await getDB()
-    const rec = await db.findOne('url', this.url)
-    if (rec) {
-      if (this.etag === rec.etag) {
-        this.hash = rec.hash
-        return this.hash
-      }
+    const rows = (await db.getAll())
+      .filter(({ url }) => url.startsWith(`s3://${Bucket}/${Prefix}`))
+      .sort(sortBy('url'))
+    for (const row of rows) {
+      const url = new URL(row.url)
+      const path = relative(Prefix, url.pathname.replace(/^\//, ''))
+      if (!filter(path)) continue
+      yield { ...row, path }
+    }
+  }
+
+  async getHash (row) {
+    if (row && row.mtime === this.mtime && row.size === this.size) {
+      this.hash = row.hash
+      return
     }
 
     this.emit('hashing')
-    const stats = await s3stat(`s3://${this.url}`)
-
+    const stats = await s3stat(this.url)
     this.hash = stats.md5 || 'UNKNOWN'
-    await db.upsert({
-      ...(rec || {}),
-      url: this.url,
-      etag: this.etag,
-      hash: this.hash
-    })
 
-    return this.hash
+    const db = await getDB()
+    await db.upsert({
+      ...(row || {}),
+      url: this.url,
+      mtime: this.mtime,
+      size: this.size,
+      hash: this.hash,
+      path: undefined
+    })
   }
 }
-
-const getDB = once(async () => {
-  const db = new Database('s3file_md5_cache.db')
-  await db.ensureIndex({ fieldName: 'url', unique: true })
-  return db
-})

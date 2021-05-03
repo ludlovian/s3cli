@@ -1,13 +1,11 @@
-import crypto from 'crypto'
 import EventEmitter from 'events'
-import { stat, realpath } from 'fs/promises'
-import { createReadStream } from 'fs'
-import { resolve, relative } from 'path'
+import { relative, join } from 'path'
 
-import Database from 'jsdb'
 import filescan from 'filescan'
+import hashFile from 'hash-stream/simple'
 
-import { once } from './util.mjs'
+import { sortBy } from './util.mjs'
+import { getDB } from './database.mjs'
 
 export default class Local extends EventEmitter {
   constructor (data) {
@@ -15,8 +13,7 @@ export default class Local extends EventEmitter {
     Object.assign(this, data)
   }
 
-  static async * scan (root, filter) {
-    root = resolve(root)
+  static async * files (root, filter) {
     for await (const { path: fullpath, stats } of filescan(root)) {
       if (!stats.isFile()) continue
       const path = relative(root, fullpath)
@@ -25,45 +22,37 @@ export default class Local extends EventEmitter {
     }
   }
 
-  async getHash () {
-    if (this.hash) return this.hash
+  static async * hashes (root, filter) {
     const db = await getDB()
-    this.fullpath = await realpath(this.fullpath)
-    if (!this.stats) this.stats = await stat(this.fullpath)
-    const rec = await db.findOne('path', this.fullpath)
-    if (rec) {
-      if (this.stats.mtimeMs === rec.mtime && this.stats.size === rec.size) {
-        this.hash = rec.hash
-        return this.hash
-      }
+    const rows = (await db.getAll())
+      .filter(({ url }) => url.startsWith(`file://${root}/`))
+      .sort(sortBy('url'))
+    for (const row of rows) {
+      const url = new URL(row.url)
+      const path = relative(root, url.pathname)
+      if (!filter(path)) continue
+      yield { ...row, path }
+    }
+  }
+
+  async getHash (row) {
+    const stats = this.stats
+    if (row && stats.mtimeMs === row.mtime && stats.size === row.size) {
+      this.hash = row.hash
+      return
     }
 
     this.emit('hashing')
     this.hash = await hashFile(this.fullpath)
 
+    const db = await getDB()
     await db.upsert({
-      ...(rec || {}),
-      path: this.fullpath,
+      ...(row || {}),
+      url: `file://${join(this.root, this.path)}`,
       mtime: this.stats.mtimeMs,
       size: this.stats.size,
-      hash: this.hash
+      hash: this.hash,
+      path: undefined
     })
-
-    return this.hash
   }
-}
-
-const getDB = once(async () => {
-  const db = new Database('file_md5_cache.db')
-  await db.ensureIndex({ fieldName: 'path', unique: true })
-  return db
-})
-
-async function hashFile (file) {
-  const rs = createReadStream(file)
-  const hasher = crypto.createHash('md5')
-  for await (const chunk of rs) {
-    hasher.update(chunk)
-  }
-  return hasher.digest('hex')
 }

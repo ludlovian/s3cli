@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import sade from 'sade';
 import { createReadStream, createWriteStream, unlinkSync } from 'fs';
-import { stat as stat$2, chmod, utimes, symlink, readFile, open, rename, appendFile, lstat, readdir, realpath, unlink } from 'fs/promises';
+import { stat as stat$2, chmod, utimes, lstat, readdir, symlink, readFile, open, rename, appendFile, realpath, unlink } from 'fs/promises';
 import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 import AWS from 'aws-sdk';
-import crypto, { createHash } from 'crypto';
+import { createHash } from 'crypto';
 import mime from 'mime';
-import { extname, resolve, basename, join, relative } from 'path';
+import { extname, resolve, join, basename, relative } from 'path';
 import EventEmitter from 'events';
 import { format as format$1 } from '@lukeed/ms';
 import tinydate from 'tinydate';
@@ -138,7 +138,7 @@ function hashStream ({ algo = 'md5', enc = 'hex' } = {}) {
   }
 }
 
-async function hashFile$1 (filename, { algo = 'md5', enc = 'hex' } = {}) {
+async function hashFile (filename, { algo = 'md5', enc = 'hex' } = {}) {
   const hasher = createHash(algo);
   for await (const chunk of createReadStream(filename)) {
     hasher.update(chunk);
@@ -169,7 +169,7 @@ async function getFileMetadata (file) {
   }
 }
 
-const getLocalHash = hashFile$1;
+const getLocalHash = hashFile;
 
 function once$1 (fn) {
   let called = false;
@@ -218,10 +218,10 @@ const getS3 = once$1(async () => {
 // split an s3 url into Bucket and Key
 //
 function parseAddress (url) {
-  const match = /^s3:\/\/([a-zA-Z0-9_-]+)\/?(.*)$/.exec(url);
-  if (!match) throw new Error(`Bad S3 URL: ${url}`)
-  const [, Bucket, Key] = match;
-  return { Bucket, Key }
+  url = new URL(url);
+  const { protocol, hostname, pathname } = url;
+  if (protocol !== 's3:') throw new TypeError(`Bad S3 URL: ${url}`)
+  return { Bucket: hostname, Key: pathname.replace(/^\//, '') }
 }
 
 // scan
@@ -601,42 +601,6 @@ const STORAGE_CLASS = {
   DEEP_ARCHIVE: 'D'
 };
 
-function upload (file, url, { progress, limit }) {
-  return upload$1(file, url, {
-    onProgress: !!progress && doProgress$1(url),
-    limit
-  })
-}
-
-function doProgress$1 (url) {
-  report('file.transfer.start', url);
-  const direction = 'uploaded';
-  return data => {
-    const { bytes, done, speedo } = data;
-    const { percent, total, taken, eta, rate: speed } = speedo;
-    const payload = { bytes, percent, total, taken, eta, speed, direction };
-    report(`file.transfer.${done ? 'done' : 'update'}`, payload);
-  }
-}
-
-function download (url, file, { progress, limit }) {
-  return download$1(url, file, {
-    onProgress: !!progress && doProgress(file),
-    limit
-  })
-}
-
-function doProgress (dest) {
-  report('file.transfer.start', resolve(dest));
-  const direction = 'downloaded';
-  return data => {
-    const { bytes, done, speedo } = data;
-    const { total, percent, eta, taken, rate: speed } = speedo;
-    const payload = { bytes, percent, total, taken, eta, speed, direction };
-    report(`file.transfer.${done ? 'done' : 'update'}`, payload);
-  }
-}
-
 function retry (fn, opts = {}) {
   return tryOne({ ...opts, fn, attempt: 1 })
 }
@@ -662,6 +626,223 @@ function tryOne (options) {
 retry.exponential = x => n => Math.round(n * x);
 
 const sleep = delay => new Promise(resolve => setTimeout(resolve, delay));
+
+function upload (file, url, { progress, limit }) {
+  const retryOpts = {
+    retries: 5,
+    delay: 5000,
+    onRetry: data => report('retry', data)
+  };
+  const s3opts = { onProgress: !!progress && doProgress$1(url), limit };
+  return retry(() => upload$1(file, url, s3opts), retryOpts)
+}
+
+function doProgress$1 (url) {
+  report('file.transfer.start', url);
+  const direction = 'uploaded';
+  return data => {
+    const { bytes, done, speedo } = data;
+    const { percent, total, taken, eta, rate: speed } = speedo;
+    const payload = { bytes, percent, total, taken, eta, speed, direction };
+    report(`file.transfer.${done ? 'done' : 'update'}`, payload);
+  }
+}
+
+function download (url, file, { progress, limit }) {
+  const retryOpts = {
+    retries: 5,
+    delay: 5000,
+    onRetry: data => report('retry', data)
+  };
+  const s3opts = { onProgress: !!progress && doProgress(url), limit };
+  return retry(() => download$1(url, file, s3opts), retryOpts)
+}
+
+function doProgress (dest) {
+  report('file.transfer.start', resolve(dest));
+  const direction = 'downloaded';
+  return data => {
+    const { bytes, done, speedo } = data;
+    const { total, percent, eta, taken, rate: speed } = speedo;
+    const payload = { bytes, percent, total, taken, eta, speed, direction };
+    report(`file.transfer.${done ? 'done' : 'update'}`, payload);
+  }
+}
+
+class Stream {
+  constructor (source, selector) {
+    Object.assign(this, {
+      source,
+      selector,
+      done: false,
+      value: undefined,
+      key: undefined,
+      missed: new Map()
+    });
+  }
+
+  async read () {
+    if (this.done) return
+    const { done, value } = await this.source.next();
+    if (done) {
+      this.done = true;
+      this.value = this.key = null;
+    } else {
+      this.value = value;
+      this.key = this.selector(value);
+    }
+    return this.value
+  }
+
+  async readIfOn (key, store) {
+    if (this.key !== key) return this.value
+    if (store) this.missed.set(this.key, this.value);
+    return this.read()
+  }
+
+  has (key) {
+    // do we have this, either missed or current
+    return this.key === key || this.missed.has(key)
+  }
+
+  get (key) {
+    // return the item (current or missed)
+    if (this.key === key) return this.value
+    const value = this.missed.get(key);
+    this.missed.delete(key);
+    return value || null
+  }
+
+  keys () {
+    return [...this.missed.keys()]
+  }
+}
+
+function makeSelector (key) {
+  return typeof key === 'function' ? key : record => record[key]
+}
+
+function allSame (vals) {
+  for (let i = 1; i < vals.length; i++) {
+    if (vals[i] !== vals[0]) return false
+  }
+  return true
+}
+
+function earliest (vals) {
+  let ret;
+  for (let i = 0; i < vals.length; i++) {
+    if (!ret || vals[i] < ret) ret = vals[i];
+  }
+  return ret
+}
+
+function uniq (arrs) {
+  return [...new Set([].concat(...arrs))]
+}
+
+async function * weave (keyFunc, ...sources) {
+  if (!sources.length) return
+  const selector = makeSelector(keyFunc);
+  const streams = sources.map(source => new Stream(source, selector));
+
+  await read(streams);
+  while (!streams.every(stream => stream.done)) {
+    const keys = streams.map(stream => stream.key);
+    if (allSame(keys)) {
+      const key = keys[0];
+      yield valueFor(streams, key);
+      await read(streams);
+    } else {
+      const key = earliest(keys);
+      if (streams.every(stream => stream.has(key))) {
+        yield valueFor(streams, key);
+        await read(streams, key);
+      } else {
+        await read(streams, key, true);
+      }
+    }
+  }
+
+  const keys = uniq(streams.map(stream => stream.keys()));
+  for (const key of keys) {
+    yield valueFor(streams, key);
+  }
+}
+
+function read (streams, key, store) {
+  if (key) {
+    return Promise.all(streams.map(stream => stream.readIfOn(key, store)))
+  } else {
+    return Promise.all(streams.map(stream => stream.read()))
+  }
+}
+
+function valueFor (streams, key) {
+  return [key, ...streams.map(stream => stream.get(key))]
+}
+
+async function * filescan (options) {
+  if (typeof options === 'string') options = { path: options };
+  let { path: root, prune, depth } = options;
+  if (!prune) prune = [];
+  if (!Array.isArray(prune)) prune = [prune];
+  prune = new Set(prune.map(path => join(root, path)));
+
+  yield * scan(root);
+
+  async function * scan (path) {
+    if (prune.has(path)) return
+    const stats = await lstat(path);
+    if (!stats.isDirectory()) {
+      yield { path, stats };
+      return
+    }
+    let files = await readdir(path);
+    files.sort();
+    if (!depth) yield { path, stats, files };
+    for (const file of files) {
+      yield * scan(join(path, file));
+    }
+    if (depth) {
+      files = await readdir(path);
+      files.sort();
+      yield { path, stats, files };
+    }
+  }
+}
+
+const once = fn => {
+  function f (...args) {
+    if (f.called) return f.value
+    f.value = fn(...args);
+    f.called = true;
+    return f.value
+  }
+
+  if (fn.name) {
+    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
+  }
+  return f
+};
+
+function sortBy (name, desc) {
+  const fn = typeof name === 'function' ? name : x => x[name];
+  const parent = typeof this === 'function' ? this : null;
+  const m = desc ? -1 : 1;
+  sortFunc.thenBy = sortBy;
+  return sortFunc
+
+  function sortFunc (a, b) {
+    return (parent && parent(a, b)) || m * compare(a, b, fn)
+  }
+
+  function compare (a, b, fn) {
+    const va = fn(a);
+    const vb = fn(b);
+    return va < vb ? -1 : va > vb ? 1 : 0
+  }
+}
 
 class DatastoreError extends Error {
   constructor (name, message) {
@@ -785,7 +966,7 @@ function stringify (obj) {
 function parse (s) {
   return JSON.parse(s, function (k, v) {
     if (k === DATE_SENTINEL) return new Date(v)
-    if (typeof v === 'object' && DATE_SENTINEL in v) return v[DATE_SENTINEL]
+    if (v && typeof v === 'object' && DATE_SENTINEL in v) return v[DATE_SENTINEL]
     return v
   })
 }
@@ -912,10 +1093,13 @@ function cleanup () {
   });
 }
 
+function cleanAndGo () {
+  setImmediate(() => process.exit(2));
+}
+
 process
   .on('exit', cleanup)
-  .on('SIGINT', cleanup)
-  .on('SIGTERM', cleanup);
+  .on('SIGINT', cleanAndGo);
 
 class Datastore {
   constructor (options) {
@@ -1212,49 +1396,20 @@ class Database {
 
 Object.assign(Database, { KeyViolation, NotExists, NoIndex, DatabaseLocked });
 
-async function * filescan (options) {
-  if (typeof options === 'string') options = { path: options };
-  let { path: root, prune, depth } = options;
-  if (!prune) prune = [];
-  if (!Array.isArray(prune)) prune = [prune];
-  prune = new Set(prune.map(path => join(root, path)));
+const getDB = once(async function getDB () {
+  const db = new Database('url_md5_cache.db');
+  return db
+});
 
-  yield * scan(root);
-
-  async function * scan (path) {
-    if (prune.has(path)) return
-    const stats = await lstat(path);
-    if (!stats.isDirectory()) {
-      yield { path, stats };
-      return
-    }
-    let files = await readdir(path);
-    files.sort();
-    if (!depth) yield { path, stats, files };
-    for (const file of files) {
-      yield * scan(join(path, file));
-    }
-    if (depth) {
-      files = await readdir(path);
-      files.sort();
-      yield { path, stats, files };
-    }
-  }
+async function removeRow (row) {
+  const db = await getDB();
+  await db.delete(row);
 }
 
-const once = fn => {
-  function f (...args) {
-    if (f.called) return f.value
-    f.value = fn(...args);
-    f.called = true;
-    return f.value
-  }
-
-  if (fn.name) {
-    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
-  }
-  return f
-};
+async function compactDatabase () {
+  const db = await getDB();
+  await db.compact('url');
+}
 
 class Local extends EventEmitter {
   constructor (data) {
@@ -1262,8 +1417,7 @@ class Local extends EventEmitter {
     Object.assign(this, data);
   }
 
-  static async * scan (root, filter) {
-    root = resolve(root);
+  static async * files (root, filter) {
     for await (const { path: fullpath, stats } of filescan(root)) {
       if (!stats.isFile()) continue
       const path = relative(root, fullpath);
@@ -1272,59 +1426,48 @@ class Local extends EventEmitter {
     }
   }
 
-  async getHash () {
-    if (this.hash) return this.hash
-    const db = await getDB$1();
-    this.fullpath = await realpath(this.fullpath);
-    if (!this.stats) this.stats = await stat$2(this.fullpath);
-    const rec = await db.findOne('path', this.fullpath);
-    if (rec) {
-      if (this.stats.mtimeMs === rec.mtime && this.stats.size === rec.size) {
-        this.hash = rec.hash;
-        return this.hash
-      }
+  static async * hashes (root, filter) {
+    const db = await getDB();
+    const rows = (await db.getAll())
+      .filter(({ url }) => url.startsWith(`file://${root}/`))
+      .sort(sortBy('url'));
+    for (const row of rows) {
+      const url = new URL(row.url);
+      const path = relative(root, url.pathname);
+      if (!filter(path)) continue
+      yield { ...row, path };
+    }
+  }
+
+  async getHash (row) {
+    const stats = this.stats;
+    if (row && stats.mtimeMs === row.mtime && stats.size === row.size) {
+      this.hash = row.hash;
+      return
     }
 
     this.emit('hashing');
     this.hash = await hashFile(this.fullpath);
 
+    const db = await getDB();
     await db.upsert({
-      ...(rec || {}),
-      path: this.fullpath,
+      ...(row || {}),
+      url: `file://${join(this.root, this.path)}`,
       mtime: this.stats.mtimeMs,
       size: this.stats.size,
-      hash: this.hash
+      hash: this.hash,
+      path: undefined
     });
-
-    return this.hash
   }
-}
-
-const getDB$1 = once(async () => {
-  const db = new Database('file_md5_cache.db');
-  await db.ensureIndex({ fieldName: 'path', unique: true });
-  return db
-});
-
-async function hashFile (file) {
-  const rs = createReadStream(file);
-  const hasher = crypto.createHash('md5');
-  for await (const chunk of rs) {
-    hasher.update(chunk);
-  }
-  return hasher.digest('hex')
 }
 
 class Remote extends EventEmitter {
   constructor (data) {
     super();
     Object.assign(this, data);
-    if (this.etag && !this.etag.includes('-')) {
-      this.hash = this.etag;
-    }
   }
 
-  static async * scan (root, filter) {
+  static async * files (root, filter) {
     const { Bucket, Key: Prefix } = parseAddress(root);
     for await (const data of scan(root + '/')) {
       const path = relative(Prefix, data.Key);
@@ -1332,165 +1475,53 @@ class Remote extends EventEmitter {
       yield new Remote({
         path,
         root,
-        url: `${Bucket}/${data.Key}`,
-        etag: data.ETag.replace(/"/g, '')
+        url: `s3://${Bucket}/${data.Key}`,
+        mtime: +data.LastModified,
+        size: data.Size
       });
     }
   }
 
-  async getHash () {
-    if (this.hash) return this.hash
+  static async * hashes (root, filter) {
+    const { Bucket, Key: Prefix } = parseAddress(root);
     const db = await getDB();
-    const rec = await db.findOne('url', this.url);
-    if (rec) {
-      if (this.etag === rec.etag) {
-        this.hash = rec.hash;
-        return this.hash
-      }
+    const rows = (await db.getAll())
+      .filter(({ url }) => url.startsWith(`s3://${Bucket}/${Prefix}`))
+      .sort(sortBy('url'));
+    for (const row of rows) {
+      const url = new URL(row.url);
+      const path = relative(Prefix, url.pathname.replace(/^\//, ''));
+      if (!filter(path)) continue
+      yield { ...row, path };
+    }
+  }
+
+  async getHash (row) {
+    if (row && row.mtime === this.mtime && row.size === this.size) {
+      this.hash = row.hash;
+      return
     }
 
     this.emit('hashing');
-    const stats = await stat$1(`s3://${this.url}`);
-
+    const stats = await stat$1(this.url);
     this.hash = stats.md5 || 'UNKNOWN';
-    await db.upsert({
-      ...(rec || {}),
-      url: this.url,
-      etag: this.etag,
-      hash: this.hash
-    });
 
-    return this.hash
+    const db = await getDB();
+    await db.upsert({
+      ...(row || {}),
+      url: this.url,
+      mtime: this.mtime,
+      size: this.size,
+      hash: this.hash,
+      path: undefined
+    });
   }
 }
 
-const getDB = once(async () => {
-  const db = new Database('s3file_md5_cache.db');
-  await db.ensureIndex({ fieldName: 'url', unique: true });
-  return db
-});
-
-// generic matcher
-//
-// takes a range of streams (as async generators) and matches on keys,
-// yielding a tuple of entries
-//
-// Key is specified as a picking function, or a string (to use that
-// property)
-//
-// If a key is not found in all streams, then the missing entry in the
-// tuple will be falsy.
-//
-// It works best if everything is (mostly) sorted, but can cope with things
-// out of order.
-
-async function * match (selectKey, ...sources) {
-  selectKey = makeSelector(selectKey);
-
-  // we will store out-of-order things in maps just in case they arrive
-  // later. Once we have created a full entry we can yield it out.
-  //
-  // Once we get to the end, we know we have a collection of partial
-  // entries.
-  const found = sources.map(() => new Map());
-
-  // read the first item of each source to prefill our head vector
-  let heads = await readAll(sources);
-
-  while (true) {
-    // If all the heads are off the end, then we have run out of new
-    // data, and we exit the loop, prior to cleaning up partials
-    //
-    if (heads.every(v => !v)) break
-
-    // if all the keys are the same, then we are delightfully in sync
-    // We hope this is the most common scenario. We can just yield out
-    // the current head tuple and move on
-    if (allHaveSameKey(heads)) {
-      yield heads;
-      heads = await readAll(sources);
-      continue
-    }
-
-    // Alas we are not in sync. So let's find the earliest key, and
-    // pick all the sources on that key
-    const currKey = findEarliestKey(heads);
-    const matches = heads.map(v => v && selectKey(v) === currKey);
-
-    // if we have found all the missing ones already, then we are
-    // okay again. We can extract the missing saved ones, yield the
-    // full tuple and move on
-    if (matches.every((matched, ix) => matched || found[ix].has(currKey))) {
-      const current = heads.map((v, ix) => {
-        if (!matches[ix]) {
-          v = found[ix].get(currKey);
-          found[ix].delete(currKey);
-        }
-        return v
-      });
-      yield current;
-      heads = await readSome(sources, heads, matches);
-      continue
-    }
-
-    // Sadly, we do not have enough to complete a full entry, so we
-    // store away the ones we have, and advance and go around again
-    heads.forEach((v, ix) => {
-      if (matches[ix]) found[ix].set(currKey, v);
-    });
-    heads = await readSome(sources, heads, matches);
-  }
-
-  // we have finished all sources, and what we have left in the found
-  // maps is a collection of partial entries. So we just go through these
-  // in any old order, assembling partials as best we can.
-
-  // first lets get a unique list of all the keys
-  const keys = found.reduce(
-    (keys, map) => new Set([...keys, ...map.keys()]),
-    new Set()
-  );
-
-  // and for each key, we assemble the partial entry and yield
-  for (const key of keys) {
-    const current = heads.map((v, ix) =>
-      found[ix].has(key) ? found[ix].get(key) : undefined
-    );
-    yield current;
-  }
-
-  // and we're done.
-
-  function allHaveSameKey (vals) {
-    const keys = vals.map(v => (v ? selectKey(v) : null));
-    return keys.every(k => k === keys[0])
-  }
-
-  function findEarliestKey (vals) {
-    return vals.reduce((earliest, v) => {
-      if (!v) return earliest
-      const k = selectKey(v);
-      return !earliest || k < earliest ? k : earliest
-    }, null)
-  }
-
-  function readSome (gens, curr, matches) {
-    return Promise.all(
-      gens.map((gen, ix) => (matches[ix] ? readItem(gen) : curr[ix]))
-    )
-  }
-
-  function readAll (gens) {
-    return Promise.all(gens.map(readItem))
-  }
-
-  function readItem (gen) {
-    return gen.next().then(v => (v.done ? undefined : v.value))
-  }
-
-  function makeSelector (sel) {
-    return typeof sel === 'function' ? sel : x => x[sel]
-  }
+async function rm (url) {
+  report('delete.file.start', url);
+  await deleteObject(url);
+  report('delete.file.done', url);
 }
 
 async function sync (
@@ -1498,116 +1529,84 @@ async function sync (
   rRoot,
   { dryRun, download: downsync, delete: deleteExtra, ...options }
 ) {
-  lRoot = lRoot.replace(/\/$/, '');
+  report('sync.start');
+  lRoot = await realpath(resolve(lRoot.replace(/\/$/, '')));
   rRoot = rRoot.replace(/\/$/, '');
 
-  report('sync.start');
-
   const filter = getFilter(options);
-  const lFiles = Local.scan(lRoot, filter);
-  const rFiles = Remote.scan(rRoot, filter);
+  const lFiles = Local.files(lRoot, filter);
+  const lHashes = Local.hashes(lRoot, filter);
+  const rFiles = Remote.files(rRoot, filter);
+  const rHashes = Remote.hashes(rRoot, filter);
 
   let fileCount = 0;
-  for await (const [local, remote] of match('path', lFiles, rFiles)) {
+  const items = weave('path', lFiles, lHashes, rFiles, rHashes);
+
+  for await (const item of items) {
     fileCount++;
-    const path = local ? local.path : remote.path;
-    report('sync.file.start', path);
+    const [path, local, lrow, remote, rrow] = item;
+    if (path) report('sync.file.start', path);
+
     if (local) {
       local.on('hashing', () => report('sync.file.hashing', path));
-      await local.getHash();
+      await local.getHash(lrow);
     }
+
     if (remote) {
       remote.on('hashing', () => report('sync.file.hashing', path));
-      await remote.getHash();
+      await remote.getHash(rrow);
     }
+
     if (local && remote) {
-      // if they are the same, we can skip this file
       if (local.hash === remote.hash) continue
       if (downsync) {
-        await downloadFile(remote);
+        await downloadFile(remote.url, lRoot, path);
       } else {
-        await uploadFile(local);
+        await uploadFile(local.fullpath, rRoot, path);
       }
     } else if (local) {
       if (downsync) {
         if (deleteExtra) {
-          await deleteLocal(local);
+          await deleteLocal(lRoot, path);
         }
       } else {
-        await uploadFile(local);
+        await uploadFile(local.fullpath, rRoot, path);
       }
-    } else {
-      // only remote exists. If uploading, warn about extraneous files, else
-      // download it
+    } else if (remote) {
       if (downsync) {
-        await downloadFile(remote);
+        await downloadFile(remote.url, lRoot, path);
       } else {
         if (deleteExtra) {
-          await deleteRemote(remote);
+          await deleteRemote(rRoot, path);
         }
       }
+    } else {
+      if (lrow) await removeRow(lrow);
+      if (rrow) await removeRow(rrow);
     }
   }
+  await compactDatabase();
+
   report('sync.done', { count: fileCount });
 
-  async function uploadFile ({ path, fullpath }) {
-    if (dryRun) {
-      report('sync.file.dryrun', { path, action: 'upload' });
-      return
-    }
-
-    return retry(
-      () =>
-        upload(fullpath, `${rRoot}/${path}`, {
-          ...options,
-          progress: true
-        }),
-      {
-        retries: 5,
-        delay: 5000,
-        onRetry: data => report('retry', data)
-      }
-    )
+  async function uploadFile (file, rRoot, path, action = 'upload') {
+    if (dryRun) return report('sync.file.dryrun', { path, action })
+    return upload(file, `${rRoot}/${path}`, { ...options, progress: true })
   }
 
-  async function downloadFile ({ path, url }) {
-    if (dryRun) {
-      report('sync.file.dryrun', { path, action: 'download' });
-      return
-    }
-
-    return retry(
-      () =>
-        download(url, join(lRoot, path), {
-          ...options,
-          progress: true
-        }),
-      {
-        retries: 5,
-        delay: 5000,
-        onRetry: data => report('retry', data)
-      }
-    )
+  async function downloadFile (url, lRoot, path, action = 'download') {
+    if (dryRun) return report('sync.file.dryrun', { path, action })
+    return download(url, join(lRoot, path), { ...options, progress: true })
   }
 
-  async function deleteLocal ({ path }) {
-    if (dryRun) {
-      report('sync.file.dryrun', { path, action: 'delete' });
-      return
-    }
-
+  async function deleteLocal (lRoot, path, action = 'delete') {
+    if (dryRun) return report('sync.file.dryrun', { path, action })
     return unlink(join(lRoot, path))
   }
 
-  async function deleteRemote ({ path }) {
-    if (dryRun) {
-      report('sync.file.dryrun', { path, action: 'delete' });
-      return
-    }
-    const url = `${rRoot}/${path}`;
-    report('delete.file.start', url);
-    await deleteObject(url);
-    report('delete.file.done', url);
+  async function deleteRemote (rRoot, path, action = 'delete') {
+    if (dryRun) return report('sync.file.dryrun', { path, action })
+    return rm(`${rRoot}/${path}`)
   }
 }
 
@@ -1634,12 +1633,6 @@ async function stat (url) {
     report('stat.details', { key, value, width });
   }
   report('stat.done', url);
-}
-
-async function rm (url) {
-  report('delete.file.start', url);
-  await deleteObject(url);
-  report('delete.file.done', url);
 }
 
 const prog = sade('s3cli');

@@ -1,12 +1,16 @@
 import { upload as s3upload } from 's3js'
+import retry from 'retry'
 
 import report from './report.mjs'
 
 export default function upload (file, url, { progress, limit }) {
-  return s3upload(file, url, {
-    onProgress: !!progress && doProgress(url),
-    limit
-  })
+  const retryOpts = {
+    retries: 5,
+    delay: 5000,
+    onRetry: data => report('retry', data)
+  }
+  const s3opts = { onProgress: !!progress && doProgress(url), limit }
+  return retry(() => s3upload(file, url, s3opts), retryOpts)
 }
 
 function doProgress (url) {

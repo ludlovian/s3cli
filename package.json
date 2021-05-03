@@ -28,7 +28,8 @@
     "retry": "github:ludlovian/retry",
     "s3js": "github:ludlovian/s3js",
     "sade": "^1.7.3",
-    "tinydate": "^1.3.0"
+    "tinydate": "^1.3.0",
+    "weave": "github:ludlovian/weave#semver:^1.1.0"
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^11.2.1",
