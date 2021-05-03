@@ -1,6 +1,6 @@
 {
   "name": "s3cli",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "Simple CLI for AWS S3",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
