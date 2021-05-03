@@ -4,7 +4,6 @@ import { relative } from 'path'
 import { parseAddress as s3parse, scan as s3scan, stat as s3stat } from 's3js'
 
 import { getDB } from './database.mjs'
-import { sortBy } from './util.mjs'
 
 export default class Remote extends EventEmitter {
   constructor (data) {
@@ -28,17 +27,8 @@ export default class Remote extends EventEmitter {
   }
 
   static async * hashes (root, filter) {
-    const { Bucket, Key: Prefix } = s3parse(root)
     const db = await getDB()
-    const rows = (await db.getAll())
-      .filter(({ url }) => url.startsWith(`s3://${Bucket}/${Prefix}`))
-      .sort(sortBy('url'))
-    for (const row of rows) {
-      const url = new URL(row.url)
-      const path = relative(Prefix, url.pathname.replace(/^\//, ''))
-      if (!filter(path)) continue
-      yield { ...row, path }
-    }
+    yield * db.rows(root, filter)
   }
 
   async getHash (row) {
@@ -52,13 +42,11 @@ export default class Remote extends EventEmitter {
     this.hash = stats.md5 || 'UNKNOWN'
 
     const db = await getDB()
-    await db.upsert({
-      ...(row || {}),
+    await db.store({
       url: this.url,
       mtime: this.mtime,
       size: this.size,
-      hash: this.hash,
-      path: undefined
+      hash: this.hash
     })
   }
 }

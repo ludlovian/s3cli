@@ -9,7 +9,7 @@ import upload from './upload.mjs'
 import download from './download.mjs'
 import rm from './rm.mjs'
 import report from './report.mjs'
-import { removeRow, compactDatabase } from './database.mjs'
+import { getDB } from './database.mjs'
 
 export default async function sync (
   lRoot,
@@ -68,11 +68,13 @@ export default async function sync (
         }
       }
     } else {
-      if (lrow) await removeRow(lrow)
-      if (rrow) await removeRow(rrow)
+      const db = await getDB()
+
+      if (lrow) await db.remove(lrow)
+      if (rrow) await db.remove(rrow)
     }
   }
-  await compactDatabase()
+  await getDB().then(db => db.compact())
 
   report('sync.done', { count: fileCount })
 
