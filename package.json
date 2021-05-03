@@ -28,6 +28,7 @@
     "retry": "github:ludlovian/retry",
     "s3js": "github:ludlovian/s3js",
     "sade": "^1.7.3",
+    "sortby": "github:ludlovian/sortby#semver:^1.0.0",
     "tinydate": "^1.3.0",
     "weave": "github:ludlovian/weave#semver:^1.1.0"
   },

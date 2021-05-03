@@ -1,8 +1,9 @@
 import { relative } from 'path'
 
 import JSDB from 'jsdb'
+import sortBy from 'sortby'
 
-import { once, sortBy } from './util.mjs'
+import { once } from './util.mjs'
 
 class Database {
   constructor () {
