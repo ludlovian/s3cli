@@ -1365,6 +1365,24 @@ class Database$1 {
 
 Object.assign(Database$1, { KeyViolation, NotExists, NoIndex, DatabaseLocked });
 
+function sortBy (name, desc) {
+  const fn = typeof name === 'function' ? name : x => x[name];
+  const parent = typeof this === 'function' ? this : null;
+  const direction = desc ? -1 : 1;
+  sortFunc.thenBy = sortBy;
+  return sortFunc
+
+  function sortFunc (a, b) {
+    return (parent && parent(a, b)) || direction * compare(a, b, fn)
+  }
+
+  function compare (a, b, fn) {
+    const va = fn(a);
+    const vb = fn(b);
+    return va < vb ? -1 : va > vb ? 1 : 0
+  }
+}
+
 const once = fn => {
   function f (...args) {
     if (f.called) return f.value
@@ -1379,63 +1397,74 @@ const once = fn => {
   return f
 };
 
-function sortBy (name, desc) {
-  const fn = typeof name === 'function' ? name : x => x[name];
-  const parent = typeof this === 'function' ? this : null;
-  const m = desc ? -1 : 1;
-  sortFunc.thenBy = sortBy;
-  return sortFunc
-
-  function sortFunc (a, b) {
-    return (parent && parent(a, b)) || m * compare(a, b, fn)
-  }
-
-  function compare (a, b, fn) {
-    const va = fn(a);
-    const vb = fn(b);
-    return va < vb ? -1 : va > vb ? 1 : 0
-  }
-}
-
 class Database {
   constructor () {
-    this.db = new Database$1('url_md5_cache.db');
+    this.dbPath = new Database$1('url_path.db');
+    this.dbHash = new Database$1('url_hash.db');
   }
 
   async prepare () {
-    await this.db.ensureIndex({ fieldName: 'url', unique: true });
+    await this.dbPath.ensureIndex({ fieldName: 'url', unique: true });
+    await this.dbHash.ensureIndex({ fieldName: 'dir' });
   }
 
   async * rows (prefix, filter) {
-    const urlPrefix = new URL(prefix);
-    const rows = (await this.db.getAll())
-      .filter(({ url }) => url.startsWith(urlPrefix.href))
-      .sort(sortBy('url'));
-    for (const row of rows) {
-      const urlRow = new URL(row.url);
-      const path = relative(urlPrefix.pathname, urlRow.pathname);
+    for await (const row of this._rows(prefix)) {
+      const path = urlRelative(prefix, row.url);
       if (!filter(path)) continue
       yield { ...row, path };
     }
   }
 
+  async * _rows (prefix) {
+    const paths = (await this.dbPath.getAll())
+      .filter(({ url }) => url.startsWith(prefix))
+      .sort(sortBy('url'));
+    for (const path of paths) {
+      const files = (await this.dbHash.find('dir', path._id)).sort(
+        sortBy('file')
+      );
+      for (const row of files) {
+        const { _id, dir, file, ...rest } = row;
+        const url = `${path.url}/${file}`;
+        yield { url, ...rest };
+      }
+    }
+  }
+
   async store (data) {
     const { _id, url, ...rest } = data;
-    const row = await this.db.findOne('url', url);
+    const [path, file] = splitUrl(url);
+    let dir = await this.dbPath.findOne('url', path);
+    if (!dir) dir = await this.dbPath.insert({ url: path });
+
+    const files = await this.dbHash.find('dir', dir._id);
+    const row = files.find(r => r.file === file);
     if (row) {
-      await this.db.update({ ...row, ...rest });
+      await this.dbHash.update({ ...row, ...rest });
     } else {
-      await this.db.insert({ url, ...rest });
+      await this.dbHash.insert({ dir: dir._id, file, ...rest });
     }
   }
 
   async remove ({ url }) {
-    const row = await this.db.findOne('url', url);
-    if (row) await this.db.delete(row);
+    const [path, file] = splitUrl(url);
+    const dir = await this.dbPath.findOne('url', path);
+    if (!dir) return
+
+    const files = await this.dbHash.find('dir', dir._id);
+    const row = files.find(r => r.file === file);
+    if (row) {
+      await this.dbHash.delete(row);
+      if (files.length === 1) {
+        await this.dbPath.delete(dir);
+      }
+    }
   }
 
   async compact () {
-    await this.db.compact({ sorted: 'url' });
+    await this.dbPath.compact({ sortBy: sortBy('url') });
+    await this.dbHash.compact({ sortBy: sortBy('dir').thenBy('file') });
   }
 }
 
@@ -1444,6 +1473,20 @@ const getDB = once(async function getDB () {
   await db.prepare();
   return db
 });
+
+function splitUrl (url) {
+  const match = /^(.*)\/([^/]+)$/.exec(url);
+  if (!match) throw new Error('Bad URL: ' + url)
+  const [, base, file] = match;
+  return [base, file]
+}
+
+function urlRelative (base, url) {
+  if (!url.startsWith(base)) {
+    throw new Error('Bad URL: ' + url)
+  }
+  return url.slice(base.length).replace(/^\//, '')
+}
 
 class Local extends EventEmitter {
   constructor (data) {
