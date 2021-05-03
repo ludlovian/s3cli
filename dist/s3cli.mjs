@@ -812,38 +812,6 @@ async function * filescan (options) {
   }
 }
 
-const once = fn => {
-  function f (...args) {
-    if (f.called) return f.value
-    f.value = fn(...args);
-    f.called = true;
-    return f.value
-  }
-
-  if (fn.name) {
-    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
-  }
-  return f
-};
-
-function sortBy (name, desc) {
-  const fn = typeof name === 'function' ? name : x => x[name];
-  const parent = typeof this === 'function' ? this : null;
-  const m = desc ? -1 : 1;
-  sortFunc.thenBy = sortBy;
-  return sortFunc
-
-  function sortFunc (a, b) {
-    return (parent && parent(a, b)) || m * compare(a, b, fn)
-  }
-
-  function compare (a, b, fn) {
-    const va = fn(a);
-    const vb = fn(b);
-    return va < vb ? -1 : va > vb ? 1 : 0
-  }
-}
-
 class DatastoreError extends Error {
   constructor (name, message) {
     super(message);
@@ -953,20 +921,18 @@ function cleanObject (obj) {
   }, {})
 }
 
-const DATE_SENTINEL = '$date';
+const DATE = '$date';
 
 function stringify (obj) {
   return JSON.stringify(obj, function (k, v) {
-    return this[k] instanceof Date
-      ? { [DATE_SENTINEL]: this[k].toISOString() }
-      : v
+    return this[k] instanceof Date ? { [DATE]: this[k].toISOString() } : v
   })
 }
 
 function parse (s) {
   return JSON.parse(s, function (k, v) {
-    if (k === DATE_SENTINEL) return new Date(v)
-    if (v && typeof v === 'object' && DATE_SENTINEL in v) return v[DATE_SENTINEL]
+    if (k === DATE) return new Date(v)
+    if (v && typeof v === 'object' && DATE in v) return v[DATE]
     return v
   })
 }
@@ -1093,13 +1059,13 @@ function cleanup () {
   });
 }
 
+/* c8 ignore next 4 */
 function cleanAndGo () {
+  cleanup();
   setImmediate(() => process.exit(2));
 }
 
-process
-  .on('exit', cleanup)
-  .on('SIGINT', cleanAndGo);
+process.on('exit', cleanup).on('SIGINT', cleanAndGo);
 
 class Datastore {
   constructor (options) {
@@ -1218,7 +1184,7 @@ class Datastore {
     }
   }
 
-  async rewrite ({ sorted = false } = {}) {
+  async rewrite ({ sorted = false, sortBy } = {}) {
     const {
       filename,
       serialize,
@@ -1230,7 +1196,10 @@ class Datastore {
       if (typeof sorted !== 'string' && typeof sorted !== 'function') {
         sorted = '_id';
       }
-      docs.sort(sortOn(sorted));
+      sortBy = sortOn(sorted);
+    }
+    if (sortBy && typeof sortBy === 'function') {
+      docs.sort(sortBy);
     }
     const lines = Object.values(this.indexes)
       .filter(ix => ix.options.fieldName !== '_id')
@@ -1319,7 +1288,7 @@ class Datastore {
 //
 // The public API of a jsdb database
 //
-class Database {
+class Database$1 {
   constructor (filename) {
     if (!filename || typeof filename !== 'string') {
       throw new TypeError('Bad filename')
@@ -1394,22 +1363,87 @@ class Database {
   }
 }
 
-Object.assign(Database, { KeyViolation, NotExists, NoIndex, DatabaseLocked });
+Object.assign(Database$1, { KeyViolation, NotExists, NoIndex, DatabaseLocked });
+
+const once = fn => {
+  function f (...args) {
+    if (f.called) return f.value
+    f.value = fn(...args);
+    f.called = true;
+    return f.value
+  }
+
+  if (fn.name) {
+    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
+  }
+  return f
+};
+
+function sortBy (name, desc) {
+  const fn = typeof name === 'function' ? name : x => x[name];
+  const parent = typeof this === 'function' ? this : null;
+  const m = desc ? -1 : 1;
+  sortFunc.thenBy = sortBy;
+  return sortFunc
+
+  function sortFunc (a, b) {
+    return (parent && parent(a, b)) || m * compare(a, b, fn)
+  }
+
+  function compare (a, b, fn) {
+    const va = fn(a);
+    const vb = fn(b);
+    return va < vb ? -1 : va > vb ? 1 : 0
+  }
+}
+
+class Database {
+  constructor () {
+    this.db = new Database$1('url_md5_cache.db');
+  }
+
+  async prepare () {
+    await this.db.ensureIndex({ fieldName: 'url', unique: true });
+  }
+
+  async * rows (prefix, filter) {
+    const urlPrefix = new URL(prefix);
+    const rows = (await this.db.getAll())
+      .filter(({ url }) => url.startsWith(urlPrefix.href))
+      .sort(sortBy('url'));
+    for (const row of rows) {
+      const urlRow = new URL(row.url);
+      const path = relative(urlPrefix.pathname, urlRow.pathname);
+      if (!filter(path)) continue
+      yield { ...row, path };
+    }
+  }
+
+  async store (data) {
+    const { _id, url, ...rest } = data;
+    const row = await this.db.findOne('url', url);
+    if (row) {
+      await this.db.update({ ...row, ...rest });
+    } else {
+      await this.db.insert({ url, ...rest });
+    }
+  }
+
+  async remove ({ url }) {
+    const row = await this.db.findOne('url', url);
+    if (row) await this.db.delete(row);
+  }
+
+  async compact () {
+    await this.db.compact({ sorted: 'url' });
+  }
+}
 
 const getDB = once(async function getDB () {
-  const db = new Database('url_md5_cache.db');
+  const db = new Database();
+  await db.prepare();
   return db
 });
-
-async function removeRow (row) {
-  const db = await getDB();
-  await db.delete(row);
-}
-
-async function compactDatabase () {
-  const db = await getDB();
-  await db.compact('url');
-}
 
 class Local extends EventEmitter {
   constructor (data) {
@@ -1428,15 +1462,7 @@ class Local extends EventEmitter {
 
   static async * hashes (root, filter) {
     const db = await getDB();
-    const rows = (await db.getAll())
-      .filter(({ url }) => url.startsWith(`file://${root}/`))
-      .sort(sortBy('url'));
-    for (const row of rows) {
-      const url = new URL(row.url);
-      const path = relative(root, url.pathname);
-      if (!filter(path)) continue
-      yield { ...row, path };
-    }
+    yield * db.rows('file://' + root, filter);
   }
 
   async getHash (row) {
@@ -1450,13 +1476,11 @@ class Local extends EventEmitter {
     this.hash = await hashFile(this.fullpath);
 
     const db = await getDB();
-    await db.upsert({
-      ...(row || {}),
+    await db.store({
       url: `file://${join(this.root, this.path)}`,
       mtime: this.stats.mtimeMs,
       size: this.stats.size,
-      hash: this.hash,
-      path: undefined
+      hash: this.hash
     });
   }
 }
@@ -1483,17 +1507,8 @@ class Remote extends EventEmitter {
   }
 
   static async * hashes (root, filter) {
-    const { Bucket, Key: Prefix } = parseAddress(root);
     const db = await getDB();
-    const rows = (await db.getAll())
-      .filter(({ url }) => url.startsWith(`s3://${Bucket}/${Prefix}`))
-      .sort(sortBy('url'));
-    for (const row of rows) {
-      const url = new URL(row.url);
-      const path = relative(Prefix, url.pathname.replace(/^\//, ''));
-      if (!filter(path)) continue
-      yield { ...row, path };
-    }
+    yield * db.rows(root, filter);
   }
 
   async getHash (row) {
@@ -1507,13 +1522,11 @@ class Remote extends EventEmitter {
     this.hash = stats.md5 || 'UNKNOWN';
 
     const db = await getDB();
-    await db.upsert({
-      ...(row || {}),
+    await db.store({
       url: this.url,
       mtime: this.mtime,
       size: this.size,
-      hash: this.hash,
-      path: undefined
+      hash: this.hash
     });
   }
 }
@@ -1581,11 +1594,13 @@ async function sync (
         }
       }
     } else {
-      if (lrow) await removeRow(lrow);
-      if (rrow) await removeRow(rrow);
+      const db = await getDB();
+
+      if (lrow) await db.remove(lrow);
+      if (rrow) await db.remove(rrow);
     }
   }
-  await compactDatabase();
+  await getDB().then(db => db.compact());
 
   report('sync.done', { count: fileCount });
 
@@ -1636,7 +1651,7 @@ async function stat (url) {
 }
 
 const prog = sade('s3cli');
-const version = '1.7.0';
+const version = '1.7.1';
 
 prog.version(version);
 
