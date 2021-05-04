@@ -25,6 +25,7 @@
     "filescan": "github:ludlovian/filescan",
     "jsdb": "github:ludlovian/jsdb#semver:^3.1.0",
     "logjs": "github:ludlovian/logjs",
+    "pixutil": "github:ludlovian/pixutil#semver:^1.1.0",
     "retry": "github:ludlovian/retry",
     "s3js": "github:ludlovian/s3js",
     "sade": "^1.7.3",

@@ -1,13 +1,24 @@
-export const once = fn => {
-  function f (...args) {
-    if (f.called) return f.value
-    f.value = fn(...args)
-    f.called = true
-    return f.value
-  }
+import { join, relative, dirname, basename } from 'path'
 
-  if (fn.name) {
-    Object.defineProperty(f, 'name', { value: fn.name, configurable: true })
-  }
-  return f
+export function urljoin (base, file) {
+  const url = new URL(base)
+  url.pathname = join(url.pathname, file)
+  return url.href
+}
+
+export function urlrelative (from, to) {
+  from = new URL(from)
+  to = new URL(to)
+  return relative(from.pathname || '/', to.pathname)
+}
+
+export function urldirname (url) {
+  url = new URL(url)
+  url.pathname = dirname(url.pathname)
+  return url.href
+}
+
+export function urlbasename (url) {
+  url = new URL(url)
+  return basename(url.pathname)
 }
