@@ -7,7 +7,7 @@ import { pipeline } from 'stream/promises';
 import AWS from 'aws-sdk';
 import { createHash } from 'crypto';
 import mime from 'mime';
-import { extname, resolve, join, basename, relative } from 'path';
+import { extname, resolve, join, basename, relative, dirname } from 'path';
 import EventEmitter from 'events';
 import { format as format$1 } from '@lukeed/ms';
 import tinydate from 'tinydate';
@@ -1383,7 +1383,7 @@ function sortBy (name, desc) {
   }
 }
 
-const once = fn => {
+function once (fn) {
   function f (...args) {
     if (f.called) return f.value
     f.value = fn(...args);
@@ -1394,8 +1394,32 @@ const once = fn => {
   if (fn.name) {
     Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
   }
+
   return f
-};
+}
+
+function urljoin (base, file) {
+  const url = new URL(base);
+  url.pathname = join(url.pathname, file);
+  return url.href
+}
+
+function urlrelative (from, to) {
+  from = new URL(from);
+  to = new URL(to);
+  return relative(from.pathname || '/', to.pathname)
+}
+
+function urldirname (url) {
+  url = new URL(url);
+  url.pathname = dirname(url.pathname);
+  return url.href
+}
+
+function urlbasename (url) {
+  url = new URL(url);
+  return basename(url.pathname)
+}
 
 class Database {
   constructor () {
@@ -1410,7 +1434,7 @@ class Database {
 
   async * rows (prefix, filter) {
     for await (const row of this._rows(prefix)) {
-      const path = urlRelative(prefix, row.url);
+      const path = urlrelative(prefix, row.url);
       if (!filter(path)) continue
       yield { ...row, path };
     }
@@ -1426,7 +1450,7 @@ class Database {
       );
       for (const row of files) {
         const { _id, dir, file, ...rest } = row;
-        const url = `${path.url}/${file}`;
+        const url = urljoin(path.url, file);
         yield { url, ...rest };
       }
     }
@@ -1434,7 +1458,8 @@ class Database {
 
   async store (data) {
     const { _id, url, ...rest } = data;
-    const [path, file] = splitUrl(url);
+    const path = urldirname(url);
+    const file = urlbasename(url);
     let dir = await this.dbPath.findOne('url', path);
     if (!dir) dir = await this.dbPath.insert({ url: path });
 
@@ -1448,7 +1473,8 @@ class Database {
   }
 
   async remove ({ url }) {
-    const [path, file] = splitUrl(url);
+    const path = urldirname(url);
+    const file = urlbasename(url);
     const dir = await this.dbPath.findOne('url', path);
     if (!dir) return
 
@@ -1473,20 +1499,6 @@ const getDB = once(async function getDB () {
   await db.prepare();
   return db
 });
-
-function splitUrl (url) {
-  const match = /^(.*)\/([^/]+)$/.exec(url);
-  if (!match) throw new Error('Bad URL: ' + url)
-  const [, base, file] = match;
-  return [base, file]
-}
-
-function urlRelative (base, url) {
-  if (!url.startsWith(base)) {
-    throw new Error('Bad URL: ' + url)
-  }
-  return url.slice(base.length).replace(/^\//, '')
-}
 
 class Local extends EventEmitter {
   constructor (data) {
@@ -1694,7 +1706,7 @@ async function stat (url) {
 }
 
 const prog = sade('s3cli');
-const version = '1.8.0';
+const version = '1.8.1';
 
 prog.version(version);
 
