@@ -6,11 +6,10 @@ export default {
   external: [ 
     'fs/promises',
     'stream/promises',
-    'sade',
     '@lukeed/ms',
-    'kleur/colors',
     'aws-sdk',
-    'mime',
+    'mime/lite.js',
+    'sade',
     'tinydate'
   ],
   plugins: [

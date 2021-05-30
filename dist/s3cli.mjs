@@ -6,13 +6,12 @@ import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 import AWS from 'aws-sdk';
 import { createHash } from 'crypto';
-import mime from 'mime';
+import mime from 'mime/lite.js';
 import { extname, resolve, join, basename, relative, dirname } from 'path';
 import EventEmitter from 'events';
 import { format as format$1 } from '@lukeed/ms';
 import tinydate from 'tinydate';
 import { format } from 'util';
-import { cyan as cyan$1, green as green$1, yellow, blue, magenta, red } from 'kleur/colors';
 import { homedir } from 'os';
 
 function speedo ({
@@ -138,6 +137,21 @@ function hashStream ({ algo = 'md5', enc = 'hex' } = {}) {
   }
 }
 
+function once (fn) {
+  function f (...args) {
+    if (f.called) return f.value
+    f.value = fn(...args);
+    f.called = true;
+    return f.value
+  }
+
+  if (fn.name) {
+    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
+  }
+
+  return f
+}
+
 async function hashFile (filename, { algo = 'md5', enc = 'hex' } = {}) {
   const hasher = createHash(algo);
   for await (const chunk of createReadStream(filename)) {
@@ -171,17 +185,6 @@ async function getFileMetadata (file) {
 
 const getLocalHash = hashFile;
 
-function once$1 (fn) {
-  let called = false;
-  let value;
-  return (...args) => {
-    if (called) return value
-    value = fn(...args);
-    called = true;
-    return value
-  }
-}
-
 function unpackMetadata (md, key = 's3cmd-attrs') {
   /* c8 ignore next */
   if (!md || typeof md !== 'object' || !md[key]) return {}
@@ -208,7 +211,7 @@ function maybeNumber (v) {
   return v
 }
 
-const getS3 = once$1(async () => {
+const getS3 = once(async () => {
   const REGION = 'eu-west-1';
   return new AWS.S3({ region: REGION })
 });
@@ -372,15 +375,76 @@ async function deleteObject (url, opts = {}) {
   await s3.deleteObject(request).promise();
 }
 
-const colourFuncs = { cyan: cyan$1, green: green$1, yellow, blue, magenta, red };
-const colours = Object.keys(colourFuncs);
+const allColours = (
+  '20,21,26,27,32,33,38,39,40,41,42,43,44,45,56,57,62,63,68,69,74,75,76,' +
+  '77,78,79,80,81,92,93,98,99,112,113,128,129,134,135,148,149,160,161,' +
+  '162,163,164,165,166,167,168,169,170,171,172,173,178,179,184,185,196,' +
+  '197,198,199,200,201,202,203,204,205,206,207,208,209,214,215,220,221'
+)
+  .split(',')
+  .map(x => parseInt(x, 10));
+
+const painters = [];
+
+function makePainter (n) {
+  const CSI = '\x1b[';
+  const set = CSI + (n < 8 ? n + 30 + ';22' : '38;5;' + n + ';1') + 'm';
+  const reset = CSI + '39;22m';
+  return s => {
+    if (!s.includes(CSI)) return set + s + reset
+    return removeExcess(set + s.replaceAll(reset, reset + set) + reset)
+  }
+}
+
+function painter (n) {
+  if (painters[n]) return painters[n]
+  painters[n] = makePainter(n);
+  return painters[n]
+}
+
+// eslint-disable-next-line no-control-regex
+const rgxDecolour = /(^|[^\x1b]*)((?:\x1b\[[0-9;]+m)|$)/g;
+function truncate (string, max) {
+  max -= 2; // leave two chars at end
+  if (string.length <= max) return string
+  const parts = [];
+  let w = 0;
+  for (const [, txt, clr] of string.matchAll(rgxDecolour)) {
+    parts.push(txt.slice(0, max - w), clr);
+    w = Math.min(w + txt.length, max);
+  }
+  return removeExcess(parts.join(''))
+}
+
+// eslint-disable-next-line no-control-regex
+const rgxSerialColours = /(?:\x1b\[[0-9;]+m)+(\x1b\[[0-9;]+m)/g;
+function removeExcess (string) {
+  return string.replaceAll(rgxSerialColours, '$1')
+}
+
+function randomColour () {
+  const n = Math.floor(Math.random() * allColours.length);
+  return allColours[n]
+}
+
+const colours = {
+  black: 0,
+  red: 1,
+  green: 2,
+  yellow: 3,
+  blue: 4,
+  magenta: 5,
+  cyan: 6,
+  white: 7
+};
+
 const CLEAR_LINE = '\r\x1b[0K';
-const RE_DECOLOR = /(^|[^\x1b]*)((?:\x1b\[\d*m)|$)/g; // eslint-disable-line no-control-regex
 
 const state = {
   dirty: false,
   width: process.stdout && process.stdout.columns,
-  level: process.env.LOGLEVEL,
+  /* c8 ignore next */
+  level: process.env.LOGLEVEL ? parseInt(process.env.LOGLEVEL, 10) : undefined,
   write: process.stdout.write.bind(process.stdout)
 };
 
@@ -394,7 +458,7 @@ function _log (
   if (level && (!state.level || state.level < level)) return
   const msg = format(...args);
   let string = prefix + msg;
-  if (colour && colour in colourFuncs) string = colourFuncs[colour](string);
+  if (colour != null) string = painter(colour)(string);
   if (limitWidth) string = truncate(string, state.width);
   if (newline) string = string + '\n';
   if (state.dirty) string = CLEAR_LINE + string;
@@ -402,51 +466,41 @@ function _log (
   state.write(string);
 }
 
-function truncate (string, max) {
-  max -= 2; // leave two chars at end
-  if (string.length <= max) return string
-  const parts = [];
-  let w = 0
-  ;[...string.matchAll(RE_DECOLOR)].forEach(([, txt, clr]) => {
-    parts.push(txt.slice(0, max - w), clr);
-    w = Math.min(w + txt.length, max);
-  });
-  return parts.join('')
-}
+function makeLogger (base, changes = {}) {
+  const baseOptions = base ? base._preset : {};
+  const options = {
+    ...baseOptions,
+    ...changes,
+    prefix: (baseOptions.prefix || '') + (changes.prefix || '')
+  };
+  const configurable = true;
+  const fn = (...args) => _log(args, options);
+  const addLevel = level => makeLogger(fn, { level });
+  const addColour = c =>
+    makeLogger(fn, { colour: c in colours ? colours[c] : randomColour() });
+  const addPrefix = prefix => makeLogger(fn, { prefix });
+  const status = () => makeLogger(fn, { newline: false, limitWidth: true });
 
-function merge (old, new_) {
-  const prefix = (old.prefix || '') + (new_.prefix || '');
-  return { ...old, ...new_, prefix }
-}
+  const colourFuncs = Object.fromEntries(
+    Object.entries(colours).map(([name, n]) => [
+      name,
+      { value: painter(n), configurable }
+    ])
+  );
 
-function logger (options) {
-  return Object.defineProperties((...args) => _log(args, options), {
-    _preset: { value: options, configurable: true },
-    _state: { value: state, configurable: true },
-    name: { value: 'log', configurable: true }
+  return Object.defineProperties(fn, {
+    _preset: { value: options, configurable },
+    _state: { value: state, configurable },
+    name: { value: 'log', configurable },
+    level: { value: addLevel, configurable },
+    colour: { value: addColour, configurable },
+    prefix: { value: addPrefix, configurable },
+    status: { get: status, configurable },
+    ...colourFuncs
   })
 }
 
-function nextColour () {
-  const clr = colours.shift();
-  colours.push(clr);
-  return clr
-}
-
-function fixup (log) {
-  const p = log._preset;
-  Object.assign(log, {
-    status: logger(merge(p, { newline: false, limitWidth: true })),
-    level: level => fixup(logger(merge(p, { level }))),
-    colour: colour =>
-      fixup(logger(merge(p, { colour: colour || nextColour() }))),
-    prefix: prefix => fixup(logger(merge(p, { prefix }))),
-    ...colourFuncs
-  });
-  return log
-}
-
-const log = fixup(logger({}));
+const log = makeLogger();
 
 const reporter = new EventEmitter();
 const { green, cyan } = log;
@@ -669,6 +723,10 @@ function doProgress (dest) {
   }
 }
 
+function uniq (...values) {
+  return [...new Set([].concat(...values))]
+}
+
 class Stream {
   constructor (source, selector) {
     Object.assign(this, {
@@ -737,10 +795,6 @@ function earliest (vals) {
   return ret
 }
 
-function uniq (arrs) {
-  return [...new Set([].concat(...arrs))]
-}
-
 async function * weave (keyFunc, ...sources) {
   if (!sources.length) return
   const selector = makeSelector(keyFunc);
@@ -764,7 +818,7 @@ async function * weave (keyFunc, ...sources) {
     }
   }
 
-  const keys = uniq(streams.map(stream => stream.keys()));
+  const keys = uniq(...streams.map(stream => stream.keys()));
   for (const key of keys) {
     yield valueFor(streams, key);
   }
@@ -849,52 +903,18 @@ class NoIndex extends DatastoreError {
   }
 }
 
-class PLock {
-  constructor ({ width = 1 } = {}) {
-    this.width = width;
-    this.count = 0;
-    this.awaiters = [];
-  }
-
-  acquire () {
-    if (this.count < this.width) {
-      this.count++;
-      return Promise.resolve()
-    }
-    return new Promise(resolve => this.awaiters.push(resolve))
-  }
-
-  release () {
-    if (!this.count) return
-    if (this.waiting) {
-      this.awaiters.shift()();
-    } else {
-      this.count--;
-    }
-  }
-
-  get waiting () {
-    return this.awaiters.length
-  }
-
-  async exec (fn) {
-    try {
-      await this.acquire();
-      return await Promise.resolve(fn())
-    } finally {
-      this.release();
+function Serial () {
+  let gate = Promise.resolve();
+  return {
+    exec (fn) {
+      const result = gate.then(() => fn());
+      gate = result.then(NOOP, NOOP);
+      return result
     }
   }
 }
 
-function delve (obj, key) {
-  let p = 0;
-  key = key.split('.');
-  while (obj && p < key.length) {
-    obj = obj[key[p++]];
-  }
-  return obj === undefined || p < key.length ? undefined : obj
-}
+function NOOP () {}
 
 function getId (row, existing) {
   // generate a repeatable for this row, avoiding conflicts with the other rows
@@ -908,7 +928,7 @@ function getId (row, existing) {
 }
 
 function hashString (string) {
-  return Array.from(string).reduce(
+  return [...string].reduce(
     (h, ch) => ((h << 5) - h + ch.charCodeAt(0)) & 0xffffffff,
     0
   )
@@ -935,19 +955,6 @@ function parse (s) {
     if (v && typeof v === 'object' && DATE in v) return v[DATE]
     return v
   })
-}
-
-function sortOn (selector) {
-  if (typeof selector !== 'function') {
-    const key = selector;
-    selector = x => delve(x, key);
-  }
-  return (a, b) => {
-    const x = selector(a);
-    const y = selector(b);
-    /* c8 ignore next */
-    return x < y ? -1 : x > y ? 1 : 0
-  }
 }
 
 // Indexes are maps between values and docs
@@ -977,7 +984,7 @@ class Index {
   }
 
   addDoc (doc) {
-    const value = delve(doc, this.options.fieldName);
+    const value = doc[this.options.fieldName];
     if (Array.isArray(value)) {
       value.forEach(v => this.linkValueToDoc(v, doc));
     } else {
@@ -986,7 +993,7 @@ class Index {
   }
 
   removeDoc (doc) {
-    const value = delve(doc, this.options.fieldName);
+    const value = doc[this.options.fieldName];
     if (Array.isArray(value)) {
       value.forEach(v => this.unlinkValueFromDoc(v, doc));
     } else {
@@ -1080,24 +1087,23 @@ class Datastore {
       ...options
     };
 
-    this.lock = new PLock();
-    this.lock.acquire();
+    const serial = new Serial();
+    this._exec = serial.exec.bind(serial);
     this.loaded = false;
     this.empty();
   }
 
   // API from Database class - mostly async
 
-  async exec (fn) {
-    const pItem = this.lock.exec(fn);
-    if (!this.loaded) {
-      this.loaded = true;
+  exec (fn) {
+    if (this.loaded) return this._exec(fn)
+    this.loaded = true;
+    return this._exec(async () => {
       await lockFile(this.options.filename);
       await this.hydrate();
       await this.rewrite();
-      this.lock.release();
-    }
-    return await pItem
+      return await fn()
+    })
   }
 
   async ensureIndex (options) {
@@ -1184,7 +1190,7 @@ class Datastore {
     }
   }
 
-  async rewrite ({ sorted = false, sortBy } = {}) {
+  async rewrite ({ sortBy } = {}) {
     const {
       filename,
       serialize,
@@ -1192,15 +1198,7 @@ class Datastore {
     } = this.options;
     const temp = filename + '~';
     const docs = this.allDocs();
-    if (sorted) {
-      if (typeof sorted !== 'string' && typeof sorted !== 'function') {
-        sorted = '_id';
-      }
-      sortBy = sortOn(sorted);
-    }
-    if (sortBy && typeof sortBy === 'function') {
-      docs.sort(sortBy);
-    }
+    if (sortBy && typeof sortBy === 'function') docs.sort(sortBy);
     const lines = Object.values(this.indexes)
       .filter(ix => ix.options.fieldName !== '_id')
       .map(ix => ({ [addIndex]: ix.options }))
@@ -1381,21 +1379,6 @@ function sortBy (name, desc) {
     const vb = fn(b);
     return va < vb ? -1 : va > vb ? 1 : 0
   }
-}
-
-function once (fn) {
-  function f (...args) {
-    if (f.called) return f.value
-    f.value = fn(...args);
-    f.called = true;
-    return f.value
-  }
-
-  if (fn.name) {
-    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
-  }
-
-  return f
 }
 
 function urljoin (base, file) {
