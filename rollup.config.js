@@ -6,11 +6,10 @@ export default {
   external: [ 
     'fs/promises',
     'stream/promises',
-    '@lukeed/ms',
     'aws-sdk',
+    'better-sqlite3',
     'mime/lite.js',
-    'sade',
-    'tinydate'
+    'sade'
   ],
   plugins: [
     resolve({

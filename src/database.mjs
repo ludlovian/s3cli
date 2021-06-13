@@ -1,84 +1,72 @@
-import JSDB from 'jsdb'
-import sortBy from 'sortby'
-import once from 'pixutil/once'
+import { homedir } from 'os'
+import { resolve } from 'path'
 
-import { urlrelative, urljoin, urldirname, urlbasename } from './util.mjs'
+import SQLite3 from 'better-sqlite3'
 
-class Database {
-  constructor () {
-    this.dbPath = new JSDB('url_path.db')
-    this.dbHash = new JSDB('url_hash.db')
-  }
+const db = new SQLite3(resolve(homedir(), '.databases', 'files.sqlite'))
 
-  async prepare () {
-    await this.dbPath.ensureIndex({ fieldName: 'url', unique: true })
-    await this.dbHash.ensureIndex({ fieldName: 'dir' })
-  }
+const selectLocal = db.prepare(
+  "SELECT 'file://' || path AS url, mtime, size, hash " +
+    'FROM local_files ORDER BY url ASC;'
+)
+const selectS3 = db.prepare(
+  "SELECT 's3://' || bucket || '/' || path AS url, mtime, size, hash " +
+    'FROM s3_files ORDER BY url ASC;'
+)
 
-  async * rows (prefix, filter) {
-    for await (const row of this._rows(prefix)) {
-      const path = urlrelative(prefix, row.url)
-      if (!filter(path)) continue
-      yield { ...row, path }
-    }
-  }
-
-  async * _rows (prefix) {
-    const paths = (await this.dbPath.getAll())
-      .filter(({ url }) => url.startsWith(prefix))
-      .sort(sortBy('url'))
-    for (const path of paths) {
-      const files = (await this.dbHash.find('dir', path._id)).sort(
-        sortBy('file')
-      )
-      for (const row of files) {
-        const { _id, dir, file, ...rest } = row
-        const url = urljoin(path.url, file)
-        yield { url, ...rest }
-      }
-    }
-  }
-
-  async store (data) {
-    const { _id, url, ...rest } = data
-    const path = urldirname(url)
-    const file = urlbasename(url)
-    let dir = await this.dbPath.findOne('url', path)
-    if (!dir) dir = await this.dbPath.insert({ url: path })
-
-    const files = await this.dbHash.find('dir', dir._id)
-    const row = files.find(r => r.file === file)
-    if (row) {
-      await this.dbHash.update({ ...row, ...rest })
-    } else {
-      await this.dbHash.insert({ dir: dir._id, file, ...rest })
-    }
-  }
-
-  async remove ({ url }) {
-    const path = urldirname(url)
-    const file = urlbasename(url)
-    const dir = await this.dbPath.findOne('url', path)
-    if (!dir) return
-
-    const files = await this.dbHash.find('dir', dir._id)
-    const row = files.find(r => r.file === file)
-    if (row) {
-      await this.dbHash.delete(row)
-      if (files.length === 1) {
-        await this.dbPath.delete(dir)
-      }
-    }
-  }
-
-  async compact () {
-    await this.dbPath.compact({ sortBy: sortBy('url') })
-    await this.dbHash.compact({ sortBy: sortBy('dir').thenBy('file') })
+function * rows (prefix, filter) {
+  if (!prefix.endsWith('/')) prefix += '/'
+  let select
+  if (prefix.startsWith('file://')) select = selectLocal
+  else if (prefix.startsWith('s3://')) select = selectS3
+  else select = { all: () => [] }
+  for (const row of select.all()) {
+    if (!row.url.startsWith(prefix)) continue
+    const path = row.url.slice(prefix.length)
+    if (!filter(path)) continue
+    yield { ...row, path }
   }
 }
 
-export const getDB = once(async function getDB () {
-  const db = new Database()
-  await db.prepare()
-  return db
-})
+const replaceLocal = db.prepare(
+  'REPLACE INTO local_files(path, mtime, size, hash) ' +
+    'VALUES($path, $mtime, $size, $hash);'
+)
+const replaceS3 = db.prepare(
+  'REPLACE INTO s3_files(bucket, path, mtime, size, hash) ' +
+    'VALUES($bucket, $path, $mtime, $size, $hash);'
+)
+
+function store ({ url, mtime, size, hash }) {
+  if (url.startsWith('file://')) {
+    const path = url.slice(7)
+    replaceLocal.run({ path, mtime, size, hash })
+  } else if (url.startsWith('s3://')) {
+    const u = new URL(url)
+    const bucket = u.hostname
+    const path = u.pathname.replace(/^\//, '')
+    replaceS3.run({ bucket, path, mtime, size, hash })
+  }
+}
+
+const deleteLocal = db.prepare('DELETE FROM local_files WHERE path = $path;')
+const deleteS3 = db.prepare(
+  'DELETE FROM s3_files WHERE bucket = $bucket AND path = $path;'
+)
+function remove ({ url }) {
+  if (url.startsWith('file://')) {
+    const path = url.slice(7)
+    deleteLocal.run({ path })
+  } else if (url.startsWith('s3://')) {
+    const u = new URL(url)
+    const bucket = u.hostname
+    const path = u.pathname.replace(/^\//, '')
+    deleteS3.run({ bucket, path })
+  }
+}
+
+function compact () {}
+
+export async function getDB () {
+  return { rows, store, remove, compact }
+}
