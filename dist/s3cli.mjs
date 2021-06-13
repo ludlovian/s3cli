@@ -1201,7 +1201,7 @@ async function stat (url) {
 }
 
 const prog = sade('s3cli');
-const version = '1.8.2';
+const version = '1.9.0';
 
 prog.version(version);
 
