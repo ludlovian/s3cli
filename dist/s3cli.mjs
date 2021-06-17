@@ -1025,7 +1025,7 @@ async function scanFiles (root, type, desc) {
 }
 
 const prog = sade('s3cli');
-const version = '1.9.0';
+const version = '2.0.0';
 
 prog.version(version);
 
