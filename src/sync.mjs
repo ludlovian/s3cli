@@ -1,106 +1,54 @@
-import { unlink, realpath } from 'fs/promises'
-import { join, resolve } from 'path'
-
-import weave from 'weave'
-
-import Local from './local.mjs'
-import Remote from './remote.mjs'
-import upload from './upload.mjs'
-import download from './download.mjs'
-import rm from './rm.mjs'
+import {
+  insertSyncFiles,
+  selectMissingFiles,
+  selectMissingHashes,
+  selectChanged,
+  selectSurplusFiles,
+  countFiles
+} from './db/index.mjs'
+import cp from './cp.mjs'
+import remove from './rm.mjs'
+import { list, getHash } from './vfs.mjs'
 import report from './report.mjs'
-import { getDB } from './database.mjs'
+import { validateUrl } from './util.mjs'
 
-export default async function sync (
-  lRoot,
-  rRoot,
-  { dryRun, download: downsync, delete: deleteExtra, ...options }
-) {
-  report('sync.start')
-  lRoot = await realpath(resolve(lRoot.replace(/\/$/, '')))
-  rRoot = rRoot.replace(/\/$/, '')
+export default async function sync (srcRoot, dstRoot, opts) {
+  srcRoot = validateUrl(srcRoot, { dir: true })
+  dstRoot = validateUrl(dstRoot, { dir: true })
 
-  const filter = getFilter(options)
-  const lFiles = Local.files(lRoot, filter)
-  const lHashes = Local.hashes(lRoot, filter)
-  const rFiles = Remote.files(rRoot, filter)
-  const rHashes = Remote.hashes(rRoot, filter)
+  await scanFiles(srcRoot, 'src', 'source')
+  await scanFiles(dstRoot, 'dst', 'destination')
+  report('sync.scan.done')
 
-  let fileCount = 0
-  const items = weave('path', lFiles, lHashes, rFiles, rHashes)
+  for (const { url, path } of selectMissingFiles()) {
+    await cp(url, dstRoot + path, { ...opts, progress: true })
+  }
 
-  for await (const item of items) {
-    fileCount++
-    const [path, local, lrow, remote, rrow] = item
-    if (path) report('sync.file.start', path)
+  for (const url of selectMissingHashes()) {
+    report('sync.hash', url)
+    await getHash(url)
+  }
 
-    if (local) {
-      local.on('hashing', () => report('sync.file.hashing', path))
-      await local.getHash(lrow)
-    }
+  for (const { from, to } of selectChanged()) {
+    await cp(from, to, { ...opts, progress: true })
+  }
 
-    if (remote) {
-      remote.on('hashing', () => report('sync.file.hashing', path))
-      await remote.getHash(rrow)
-    }
-
-    if (local && remote) {
-      if (local.hash === remote.hash) continue
-      if (downsync) {
-        await downloadFile(remote.url, lRoot, path)
-      } else {
-        await uploadFile(local.fullpath, rRoot, path)
-      }
-    } else if (local) {
-      if (downsync) {
-        if (deleteExtra) {
-          await deleteLocal(lRoot, path)
-        }
-      } else {
-        await uploadFile(local.fullpath, rRoot, path)
-      }
-    } else if (remote) {
-      if (downsync) {
-        await downloadFile(remote.url, lRoot, path)
-      } else {
-        if (deleteExtra) {
-          await deleteRemote(rRoot, path)
-        }
-      }
-    } else {
-      const db = await getDB()
-
-      if (lrow) await db.remove(lrow)
-      if (rrow) await db.remove(rrow)
+  if (opts.delete) {
+    for (const url of selectSurplusFiles()) {
+      await remove(url, opts)
     }
   }
-  await getDB().then(db => db.compact())
-
-  report('sync.done', { count: fileCount })
-
-  async function uploadFile (file, rRoot, path, action = 'upload') {
-    if (dryRun) return report('sync.file.dryrun', { path, action })
-    return upload(file, `${rRoot}/${path}`, { ...options, progress: true })
-  }
-
-  async function downloadFile (url, lRoot, path, action = 'download') {
-    if (dryRun) return report('sync.file.dryrun', { path, action })
-    return download(url, join(lRoot, path), { ...options, progress: true })
-  }
-
-  async function deleteLocal (lRoot, path, action = 'delete') {
-    if (dryRun) return report('sync.file.dryrun', { path, action })
-    return unlink(join(lRoot, path))
-  }
-
-  async function deleteRemote (rRoot, path, action = 'delete') {
-    if (dryRun) return report('sync.file.dryrun', { path, action })
-    return rm(`${rRoot}/${path}`)
-  }
+  report('sync.done', countFiles())
 }
 
-function getFilter ({ filter }) {
-  if (!filter) return () => true
-  const rgx = new RegExp(filter)
-  return x => rgx.test(x)
+async function scanFiles (root, type, desc) {
+  report('sync.scan.start', { kind: desc })
+  let count = 0
+  const lister = list(root)
+  lister.on('files', files => {
+    count += files.length
+    report('sync.scan', { kind: desc, count })
+    insertSyncFiles(type, files)
+  })
+  await lister.done
 }

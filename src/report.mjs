@@ -1,5 +1,5 @@
 import EventEmitter from 'events'
-import { format } from '@lukeed/ms'
+import { format as formatTime } from '@lukeed/ms'
 import tinydate from 'tinydate'
 
 import log from 'logjs'
@@ -13,84 +13,69 @@ export default function report (msg, payload) {
 
 reporter
   .on('list.file', data => {
+    let s = ''
     if (data.long) {
-      let type
-      let size = ''
-      let time = ''
-
-      if (data.directory) {
-        type = 'D'
-      } else {
-        type = data.storageClass
-        size = data.human ? fmtSize(data.size) : data.size.toString()
-        if (data.mtime) time = fmtDate(data.mtime)
-      }
-      log(
-        [type.padEnd(1), size.padStart(10), time.padEnd(18), data.key].join(
-          '  '
-        )
-      )
-    } else {
-      log(data.key)
+      s += data.storage.padEnd(1) + '  '
+      const size = data.human ? fmtSize(data.size) : data.size.toString()
+      s += size.padStart(10) + '  '
+      s += fmtDate(data.mtime).padEnd(18) + '  '
     }
+    log(s + data.path)
   })
   .on('list.file.totals', ({ totalSize, totalCount, total, human }) => {
     if (!total) return
     const s = human ? `${fmtSize(totalSize)}B` : `${comma(totalSize)} bytes`
     log(`\n${s} in ${comma(totalCount)} file${totalCount > 1 ? 's' : ''}`)
   })
-  .on('file.transfer.start', url => log(cyan(url)))
-  .on(
-    'file.transfer.update',
-    ({ bytes, percent, total, taken, eta, speed }) => {
-      log.status(
-        [
-          comma(bytes).padStart(1 + comma(total).length),
-          `${percent.toString().padStart(3)}%`,
-          `time ${format(taken)}`,
-          `eta ${eta < 1000 ? '0s' : format(eta)}`,
-          `rate ${fmtSize(speed)}B/s`
-        ].join(' ')
-      )
-    }
-  )
-  .on('file.transfer.done', ({ bytes, taken, speed, direction }) => {
+  .on('cp', opts => opts.quiet || log(opts.url))
+  .on('cp.start', url => log(cyan(url)))
+  .on('cp.update', data => {
+    const { bytes, percent, total, taken, eta, speed } = data
+    log.status(
+      [
+        comma(bytes).padStart(1 + comma(total).length),
+        `${percent.toString().padStart(3)}%`,
+        `time ${fmtTime(taken)}`,
+        `eta ${fmtTime(eta)}`,
+        `rate ${fmtSize(speed)}B/s`
+      ].join(' ')
+    )
+  })
+  .on('cp.done', ({ bytes, taken, speed }) => {
     log(
       green(
         [
-          ` ${comma(bytes)} bytes`,
-          direction,
-          `in ${format(taken, true)}`,
+          ` ${comma(bytes)} bytes copied`,
+          `in ${fmtTime(taken, true)}`,
           `at ${fmtSize((bytes * 1e3) / taken)}B/s`
         ].join(' ')
       )
     )
   })
-  .on('sync.start', () => log.status('Scanning files'))
-  .on('sync.file.start', path => log.status(path))
-  .on('sync.file.hashing', path => log.status(`${path} - hashing`))
-  .on('sync.file.dryrun', ({ path, action }) =>
-    log(`${path} - ${action} (dry run)`)
+  .on('cp.dryrun', ({ url }) => log(`${url} - copied (dry run)`))
+  .on('sync.scan.start', ({ kind }) => log.status(`Scanning ${kind} ... `))
+  .on('sync.scan', ({ kind, count }) =>
+    log.status(`Scanning ${kind} ... ${count}`)
   )
-  .on('sync.done', ({ count }) =>
+  .on('sync.scan.done', () => log.status(''))
+  .on('sync.start', () => log.status('Scanning files'))
+  .on('sync.hash', url => log.status(`${url} - hashing`))
+  .on('sync.done', count =>
     log(`${comma(count)} file${count > 1 ? 's' : ''} processed.`)
   )
-  .on('delete.file.start', path => log.status(`${path} - deleting `))
-  .on('delete.file.done', path => log(`${path} - deleted`))
+  .on('rm.dryrun', url => log(`${url} - deleted (dry run)`))
+  .on('rm', url => log(`${url} - deleted`))
   .on('retry', ({ delay, error }) => {
     console.error(
-      `\nError occured: ${error.message}\nWaiting ${format(delay)} to retry...`
+      `\nError occured: ${error.message}\nWaiting ${fmtTime(delay)} to retry...`
     )
   })
-  .on('stat.start', url => log(url + '\n'))
-  .on('stat.details', ({ key, value, width }) =>
-    log(
-      [
-        green(`${key}:`.padEnd(width + 2)),
-        value instanceof Date ? fmtDate(value) : value
-      ].join('')
-    )
-  )
+
+function fmtTime (ms) {
+  if (ms < 1000) ms = 1000 * Math.round(ms / 1000)
+  if (!ms) return '0s'
+  return formatTime(ms)
+}
 
 function fmtSize (n) {
   const suffixes = [
@@ -114,5 +99,5 @@ function comma (n) {
 }
 
 const fmtDate = tinydate('{DD}-{MMM}-{YY} {HH}:{mm}:{ss}', {
-  MMM: d => d.toLocaleString(undefined, { month: 'short' })
+  MMM: d => d.toLocaleString(undefined, { month: 'short' }).slice(0, 3)
 })

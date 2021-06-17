@@ -1,37 +1,20 @@
-import { scan } from 's3js'
-
+import { list } from './vfs.mjs'
 import report from './report.mjs'
 
 export default async function ls (url, options) {
-  const { directory } = options
-  if (directory && !url.endsWith('/')) url += '/'
-
   let totalCount = 0
   let totalSize = 0
 
-  const fileStream = scan(url, {
-    Delimiter: directory ? '/' : undefined
+  const lister = list(url)
+  lister.on('files', files => {
+    files.forEach(file => {
+      totalCount++
+      totalSize += file.size || 0
+      file.storage = STORAGE_CLASS[file.storage] || 'F'
+      report('list.file', { ...options, ...file })
+    })
   })
-
-  for await (const {
-    Key,
-    Prefix,
-    Size,
-    LastModified,
-    StorageClass
-  } of fileStream) {
-    if (Key && Key.endsWith('/')) continue
-
-    totalCount++
-    totalSize += Size || 0
-
-    const storageClass = STORAGE_CLASS[StorageClass] || '?'
-    const key = Prefix || Key
-    const mtime = LastModified
-    const size = Size
-
-    report('list.file', { ...options, key, mtime, size, storageClass })
-  }
+  await lister.done
   report('list.file.totals', { ...options, totalSize, totalCount })
 }
 

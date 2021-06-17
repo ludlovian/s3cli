@@ -1,9 +1,11 @@
-import { deleteObject } from 's3js'
-
+import { remove } from './vfs.mjs'
+import { validateUrl } from './util.mjs'
 import report from './report.mjs'
 
-export default async function rm (url) {
-  report('delete.file.start', url)
-  await deleteObject(url)
-  report('delete.file.done', url)
+export default async function rm (url, opts) {
+  url = validateUrl(url)
+  const { dryRun } = opts
+  if (dryRun) return report('rm.dryrun', url)
+  report('rm', url)
+  await remove(url)
 }

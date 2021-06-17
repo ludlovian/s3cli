@@ -1,58 +1,17 @@
 #!/usr/bin/env node
 import sade from 'sade';
-import { createReadStream, createWriteStream } from 'fs';
-import { stat as stat$2, chmod, utimes, lstat, readdir, realpath, unlink } from 'fs/promises';
-import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
+import EventEmitter, { EventEmitter as EventEmitter$1 } from 'events';
+import { PassThrough } from 'stream';
 import AWS from 'aws-sdk';
-import { createHash } from 'crypto';
-import mime from 'mime/lite.js';
-import { extname, resolve, join, relative } from 'path';
-import EventEmitter from 'events';
-import { format as format$1 } from 'util';
 import { homedir } from 'os';
-import SQLite3 from 'better-sqlite3';
-
-function speedo ({
-  total,
-  interval = 250,
-  windowSize = 40
-} = {}) {
-  let readings;
-  let start;
-  return Object.assign(transform, { current: 0, total, update, done: false })
-
-  async function * transform (source) {
-    start = Date.now();
-    readings = [[start, 0]];
-    const int = setInterval(update, interval);
-    try {
-      for await (const chunk of source) {
-        transform.current += chunk.length;
-        yield chunk;
-      }
-      transform.total = transform.current;
-      update(true);
-    } finally {
-      clearInterval(int);
-    }
-  }
-
-  function update (done = false) {
-    if (transform.done) return
-    const { current, total } = transform;
-    const now = Date.now();
-    const taken = now - start;
-    readings = [...readings, [now, current]].slice(-windowSize);
-    const first = readings[0];
-    const wl = current - first[1];
-    const wt = now - first[0];
-    const rate = 1e3 * (done ? total / taken : wl / wt);
-    const percent = Math.round((100 * current) / total);
-    const eta = done || !total ? 0 : (1e3 * (total - current)) / rate;
-    Object.assign(transform, { done, taken, rate, percent, eta });
-  }
-}
+import { resolve, extname } from 'path';
+import SQLite from 'better-sqlite3';
+import { realpath, readdir, stat as stat$1, chmod, utimes, unlink } from 'fs/promises';
+import { createReadStream as createReadStream$2, createWriteStream as createWriteStream$2 } from 'fs';
+import mime from 'mime';
+import { createHash } from 'crypto';
+import { format as format$1 } from 'util';
 
 // import assert from 'assert/strict'
 function throttle (options) {
@@ -125,14 +84,44 @@ function progressStream ({
   }
 }
 
-function hashStream ({ algo = 'md5', enc = 'hex' } = {}) {
-  return async function * transform (source) {
-    const hasher = createHash(algo);
-    for await (const chunk of source) {
-      hasher.update(chunk);
-      yield chunk;
+function speedo ({
+  total,
+  interval = 250,
+  windowSize = 40
+} = {}) {
+  let readings;
+  let start;
+  return Object.assign(transform, { current: 0, total, update, done: false })
+
+  async function * transform (source) {
+    start = Date.now();
+    readings = [[start, 0]];
+    const int = setInterval(update, interval);
+    try {
+      for await (const chunk of source) {
+        transform.current += chunk.length;
+        yield chunk;
+      }
+      transform.total = transform.current;
+      update(true);
+    } finally {
+      clearInterval(int);
     }
-    transform.hash = hasher.digest(enc);
+  }
+
+  function update (done = false) {
+    if (transform.done) return
+    const { current, total } = transform;
+    const now = Date.now();
+    const taken = now - start;
+    readings = [...readings, [now, current]].slice(-windowSize);
+    const first = readings[0];
+    const wl = current - first[1];
+    const wt = now - first[0];
+    const rate = 1e3 * (done ? total / taken : wl / wt);
+    const percent = Math.round((100 * current) / total);
+    const eta = done || !total ? 0 : (1e3 * (total - current)) / rate;
+    Object.assign(transform, { done, taken, rate, percent, eta });
   }
 }
 
@@ -151,63 +140,163 @@ function once (fn) {
   return f
 }
 
-async function hashFile (filename, { algo = 'md5', enc = 'hex' } = {}) {
-  const hasher = createHash(algo);
-  for await (const chunk of createReadStream(filename)) {
-    hasher.update(chunk);
+const ddl = t`
+  CREATE TABLE IF NOT EXISTS hash (
+    url TEXT NOT NULL PRIMARY KEY,
+    mtime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    hash TEXT
+  );
+  DROP TABLE IF EXISTS sync;
+  CREATE TEMP TABLE IF NOT EXISTS sync (
+    type TEXT NOT NULL,
+    path TEXT NOT NULL,
+    url  TEXT NOT NULL,
+    mtime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    PRIMARY KEY (type, path)
+  );
+`;
+const sql = {};
+
+sql.insertHash = t`
+  INSERT INTO hash
+    (url, mtime, size, hash)
+  VALUES
+    ($url, $mtime, $size, $hash)
+  ON CONFLICT DO UPDATE
+  SET mtime = excluded.mtime,
+      size  = excluded.size,
+      hash  = excluded.hash
+`;
+
+sql.insertSync = t`
+  INSERT INTO sync
+    (type, path, url, mtime, size)
+  VALUES
+    ($type, $path, $url, $mtime, $size)
+`;
+
+sql.selectHash = t`
+  SELECT hash
+    FROM hash
+    WHERE url = $url
+      AND mtime = $mtime
+      AND size = $size
+`;
+
+sql.selectMissingFiles = t`
+  SELECT a.url,
+         a.path
+    FROM sync a
+    LEFT JOIN sync b
+      ON  a.path = b.path
+      AND b.type = 'dst'
+    WHERE a.type = 'src'
+      AND b.path IS NULL
+    ORDER BY a.url
+`;
+
+sql.selectMissingHashes = t`
+  SELECT a.url
+    FROM sync a
+    LEFT JOIN hash b
+      ON a.url    = b.url
+      AND a.mtime = b.mtime
+      AND a.size  = b.size
+    WHERE b.hash IS NULL
+    ORDER BY a.url
+`;
+
+sql.selectChanged = t`
+  SELECT a.url AS "from",
+         b.url AS "to"
+    FROM sync a
+    JOIN sync b ON b.path = a.path
+    JOIN hash c ON c.url = a.url
+    JOIN hash d ON d.url = b.url
+    WHERE a.type = 'src'
+      AND b.type = 'dst'
+      AND c.hash != d.hash
+    ORDER BY a.url
+`;
+
+sql.selectSurplusFiles = t`
+  SELECT b.url AS url
+    FROM sync b
+    LEFT JOIN sync a
+      ON  a.path = b.path
+      AND a.type = 'src'
+    WHERE b.type = 'dst'
+      AND a.path IS NULL
+    ORDER BY b.url
+`;
+
+sql.countFiles = t`
+  SELECT count(*)
+    FROM sync
+    WHERE type = 'src'
+`;
+
+function t (strings) {
+  return strings
+    .map(s => s.split('\n'))
+    .flat()
+    .map(x => x.trim())
+    .join(' ')
+}
+
+const DB_DIR = process.env.DB_DIR || resolve(homedir(), '.databases');
+const DB_FILE = process.env.DB_FILE || 'files2.sqlite';
+
+const db = new SQLite(resolve(DB_DIR, DB_FILE));
+db.pragma('journal_mode=WAL');
+db.exec(ddl);
+
+for (const k in sql) sql[k] = db.prepare(sql[k]);
+
+db.transaction(hashes => {
+  for (const { url, mtime: _mtime, size, hash } of hashes) {
+    const mtime = _mtime.toISOString();
+    sql.insertHash.run({ url, mtime, size, hash });
   }
-  return hasher.digest(enc)
-}
+});
 
-async function getFileMetadata (file) {
-  const { mtimeMs, ctimeMs, atimeMs, size, mode } = await stat$2(file);
-  const md5 = await getLocalHash(file);
-  const contentType = mime.getType(extname(file));
-  const uid = 1000;
-  const gid = 1000;
-  const uname = 'alan';
-  const gname = 'alan';
-  return {
-    uid,
-    uname,
-    gid,
-    gname,
-    atime: Math.floor(atimeMs),
-    mtime: Math.floor(mtimeMs),
-    ctime: Math.floor(ctimeMs),
-    size,
-    mode,
-    md5,
-    contentType
+const insertSyncFiles = db.transaction((type, files) => {
+  for (const { path, url, mtime: _mtime, size } of files) {
+    const mtime = _mtime.toISOString();
+    sql.insertSync.run({ type, path, url, mtime, size });
   }
+});
+
+function selectMissingFiles () {
+  return sql.selectMissingFiles.all()
 }
 
-const getLocalHash = hashFile;
-
-function unpackMetadata (md, key = 's3cmd-attrs') {
-  /* c8 ignore next */
-  if (!md || typeof md !== 'object' || !md[key]) return {}
-  return md[key].split('/').reduce((o, item) => {
-    const [k, v] = item.split(':');
-    o[k] = maybeNumber(v);
-    return o
-  }, {})
+function selectMissingHashes () {
+  return sql.selectMissingHashes.pluck().all()
 }
 
-function packMetadata (obj, key = 's3cmd-attrs') {
-  return {
-    [key]: Object.keys(obj)
-      .sort()
-      .filter(k => obj[k] != null)
-      .map(k => `${k}:${obj[k]}`)
-      .join('/')
-  }
+function selectChanged () {
+  return sql.selectChanged.all()
 }
 
-function maybeNumber (v) {
-  const n = parseInt(v, 10);
-  if (!isNaN(n) && n.toString() === v) return n
-  return v
+function selectSurplusFiles () {
+  return sql.selectSurplusFiles.pluck().all()
+}
+
+function countFiles () {
+  return sql.countFiles.pluck().get()
+}
+
+function selectHash ({ url, mtime: _mtime, size }) {
+  const mtime = _mtime.toISOString();
+  return sql.selectHash.pluck().get({ url, mtime, size })
+}
+
+function insertHash ({ url, mtime: _mtime, size, hash }) {
+  const mtime = _mtime.toISOString();
+  sql.insertHash.run({ url, mtime, size, hash });
 }
 
 const getS3 = once(async () => {
@@ -215,163 +304,294 @@ const getS3 = once(async () => {
   return new AWS.S3({ region: REGION })
 });
 
-// parseAddress
-//
-// split an s3 url into Bucket and Key
-//
 function parseAddress (url) {
-  url = new URL(url);
-  const { protocol, hostname, pathname } = url;
-  if (protocol !== 's3:') throw new TypeError(`Bad S3 URL: ${url}`)
-  return { Bucket: hostname, Key: pathname.replace(/^\//, '') }
+  const m = /^s3:\/\/([^/]+)(?:\/(.*))?$/.exec(url);
+  if (!m) throw new TypeError(`Bad S3 URL: ${url}`)
+  return { Bucket: m[1], Key: m[2] || '' }
 }
 
-// scan
-//
-// List the objects in a bucket in an async generator
-//
-async function * scan (url, opts = {}) {
-  const { Delimiter, MaxKeys } = opts;
-  const { Bucket, Key: Prefix } = parseAddress(url);
-  const s3 = await getS3();
-  const request = { Bucket, Prefix, Delimiter, MaxKeys };
-
-  let pResult = s3.listObjectsV2(request).promise();
-
-  while (pResult) {
-    const result = await pResult;
-    // start the next one going if needed
-    /* c8 ignore next 4 */
-    if (result.IsTruncated) {
+function list$2 (baseurl) {
+  if (!baseurl.endsWith('/')) baseurl = baseurl + '/';
+  const { Bucket, Key: Prefix } = parseAddress(baseurl);
+  const lister = new EventEmitter();
+  lister.done = (async () => {
+    const s3 = await getS3();
+    const request = { Bucket, Prefix };
+    while (true) {
+      const result = await s3.listObjectsV2(request).promise();
+      const files = result.Contents.map(item => {
+        const file = {};
+        file.url = `s3://${Bucket}/${item.Key}`;
+        file.path = file.url.slice(baseurl.length);
+        file.size = item.Size;
+        file.mtime = item.LastModified;
+        if (!item.ETag.includes('-')) file.md5 = item.ETag.replaceAll('"', '');
+        file.storage = item.StorageClass;
+        return file
+      });
+      if (files.length) lister.emit('files', files);
+      if (!result.IsTruncated) break
       request.ContinuationToken = result.NextContinuationToken;
-      pResult = s3.listObjectsV2(request).promise();
-    } else {
-      pResult = null;
     }
-
-    for (const item of result.Contents) {
-      yield item;
-    }
-
-    /* c8 ignore next */
-    for (const item of result.CommonPrefixes || []) {
-      yield item;
-    }
-  }
+    lister.emit('done');
+  })();
+  return lister
 }
 
-// stat
-//
-// Perform a stat-like inspection of an object.
-// Decode the s3cmd-attrs if given
-
-async function stat$1 (url) {
+async function stat (url) {
   const { Bucket, Key } = parseAddress(url);
   const s3 = await getS3();
 
   const request = { Bucket, Key };
-  const result = await s3.headObject(request).promise();
+  const res = await s3.headObject(request).promise();
+  const attrs = unpackMetadata(res.Metadata);
   return {
-    ...result,
-    ...unpackMetadata(result.Metadata)
+    contentType: res.ContentType,
+    mtime: res.LastModified,
+    size: res.ContentLength,
+    md5: !res.ETag.includes('-') ? res.ETag.replaceAll('"', '') : attrs.md5,
+    storage: res.StorageClass,
+    attrs
   }
 }
 
-// upload
-//
-// uploads a file to S3 with progress and/or rate limiting
+async function getHash$2 (url) {
+  const { mtime, size, attrs } = await stat(url);
+  const hash = attrs && attrs.md5 ? attrs.md5 : null;
+  insertHash({ url, mtime, size, hash });
+  return hash
+}
 
-async function upload$1 (file, url, opts = {}) {
+async function createReadStream$1 (url) {
   const { Bucket, Key } = parseAddress(url);
-  const { onProgress, interval = 1000, limit } = opts;
-
   const s3 = await getS3();
-  const {
-    size: ContentLength,
-    contentType: ContentType,
-    ...metadata
-  } = await getFileMetadata(file);
+  const { mtime, size, contentType, hash, attrs } = await stat(url);
+  const source = { mtime, size, contentType, hash, attrs };
 
-  // streams
-  const speedo$1 = speedo({ total: ContentLength });
-  const Body = new PassThrough();
+  const stream = s3.getObject({ Bucket, Key }).createReadStream();
+  stream.source = source;
+  return stream
+}
+
+async function createWriteStream$1 (url, source) {
+  const { size, contentType, hash, attrs } = source;
+  const { Bucket, Key } = parseAddress(url);
+  const s3 = await getS3();
+  const passthru = new PassThrough();
+  if (!hash) throw new Error('No hash supplied')
+  if (!size) throw new Error('No size supplied')
+  if (!contentType) throw new Error('No contentType supplied')
+
+  const request = {
+    Body: passthru,
+    Bucket,
+    Key,
+    ContentLength: size,
+    ContentType: contentType,
+    ContentMD5: Buffer.from(hash, 'hex').toString('base64'),
+    Metadata: packMetadata(attrs)
+  };
+
+  passthru.done = s3
+    .putObject(request)
+    .promise()
+    .then(() => getHash$2(url));
+  return passthru
+}
+
+async function remove$2 (url) {
+  const { Bucket, Key } = parseAddress(url);
+  const s3 = await getS3();
+  await s3.deleteObject({ Bucket, Key }).promise();
+}
+
+function unpackMetadata (md, key = 's3cmd-attrs') {
+  const numbers = new Set(['mode', 'size', 'gid', 'uid']);
+  const dates = new Set(['atime', 'mtime', 'ctime']);
+  if (!md || typeof md !== 'object' || !md[key]) return {}
+  return Object.fromEntries(
+    md[key]
+      .split('/')
+      .map(x => x.split(':'))
+      .map(([k, v]) => {
+        if (dates.has(k)) {
+          v = new Date(Number(v));
+        } else if (numbers.has(k)) {
+          v = Number(v);
+        }
+        return [k, v]
+      })
+  )
+}
+
+function packMetadata (obj, key = 's3cmd-attrs') {
+  return {
+    [key]: Object.keys(obj)
+      .sort()
+      .map(k => [k, obj[k]])
+      .filter(([k, v]) => v != null)
+      .map(([k, v]) => `${k}:${v instanceof Date ? +v : v}`)
+      .join('/')
+  }
+}
+
+async function hashFile (filename, { algo = 'md5', enc = 'hex' } = {}) {
+  const hasher = createHash(algo);
+  for await (const chunk of createReadStream$2(filename)) {
+    hasher.update(chunk);
+  }
+  return hasher.digest(enc)
+}
+
+function list$1 (baseurl) {
+  const lister = new EventEmitter$1();
+  let basepath = baseurl.slice(7);
+  lister.done = (async () => {
+    basepath = await realpath(basepath);
+    if (!basepath.endsWith('/')) basepath += '/';
+    await scan(basepath);
+  })();
+  return lister
+
+  async function scan (dir) {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const files = await Promise.all(
+      entries
+        .filter(x => x.isFile())
+        .map(async ({ name }) => {
+          const fullname = dir + name;
+          const path = fullname.slice(basepath.length);
+          const url = 'file://' + fullname;
+          const stats = await stat$1(fullname);
+          return {
+            url,
+            path,
+            size: stats.size,
+            mtime: new Date(Math.round(stats.mtimeMs)),
+            mode: stats.mode & 0o777
+          }
+        })
+    );
+    if (files.length) lister.emit('files', files);
+    const dirs = entries
+      .filter(x => x.isDirectory())
+      .map(x => dir + x.name + '/');
+    await Promise.all(dirs.map(scan));
+  }
+}
+
+async function getHash$1 (url, stats) {
+  const path = url.slice(7);
+  if (!stats) stats = await stat$1(path);
+  const { mtime, size } = stats;
+  let hash = selectHash({ url, mtime, size });
+  if (hash) return hash
+  hash = await hashFile(path);
+  insertHash({ url, mtime, size, hash });
+  return hash
+}
+
+async function createReadStream (url) {
+  const path = url.slice(7);
+  const stats = await stat$1(path);
+  const hash = await getHash$1(url, stats);
+  const attrs = {
+    atime: stats.atime,
+    ctime: stats.ctime,
+    mtime: stats.mtime,
+    uid: 1000,
+    gid: 1000,
+    uname: 'alan',
+    gname: 'alan',
+    mode: stats.mode & 0o777,
+    md5: hash
+  };
+  const source = {
+    size: stats.size,
+    mtime: stats.mtime,
+    contentType: mime.getType(extname(path)),
+    hash,
+    attrs
+  };
+
+  const stream = createReadStream$2(path);
+  stream.source = source;
+  return stream
+}
+
+async function createWriteStream (url, source) {
+  const path = url.slice(7);
+  const { attrs } = source;
+  const mtime = attrs && attrs.mtime;
+  const mode = attrs && attrs.mode;
+  const stream = createWriteStream$2(path);
+  const streamComplete = new Promise((resolve, reject) =>
+    stream.on('error', reject).on('finish', resolve)
+  );
+  stream.done = streamComplete.then(async () => {
+    if (mode) await chmod(path, mode);
+    if (mtime) await utimes(path, mtime, mtime);
+    return await getHash$1(url)
+  });
+  return stream
+}
+
+async function remove$1 (url) {
+  const path = url.slice(7);
+  await unlink(path);
+}
+
+function list (url) {
+  if (isS3(url)) return list$2(url)
+  else if (isLocal(url)) return list$1(url)
+  else throw new Error('Huh? ' + url)
+}
+
+async function copy (srcUrl, dstUrl, opts = {}) {
+  const { onProgress, limit } = opts;
+  const sourceStream = isS3(srcUrl)
+    ? await createReadStream$1(srcUrl)
+    : await createReadStream(srcUrl);
+
+  const { source } = sourceStream;
+
+  const destStream = isS3(dstUrl)
+    ? await createWriteStream$1(dstUrl, source)
+    : await createWriteStream(dstUrl, source);
+
+  const speedo$1 = speedo({ total: source.size });
 
   const pPipeline = pipeline(
-    ...[
-      createReadStream(file),
+    [
+      sourceStream,
       limit && throttle(limit),
       onProgress && speedo$1,
-      onProgress && progressStream({ onProgress, interval, speedo: speedo$1 }),
-      Body
+      onProgress && progressStream({ onProgress, speedo: speedo$1 }),
+      destStream
     ].filter(Boolean)
   );
 
-  const request = {
-    Body,
-    Bucket,
-    Key,
-    ContentLength,
-    ContentType,
-    ContentMD5: Buffer.from(metadata.md5, 'hex').toString('base64'),
-    Metadata: packMetadata(metadata)
-  };
-
-  // perform the upload
-  const pUpload = s3.putObject(request).promise();
-
-  // wait for everything to finish
-  await Promise.all([pPipeline, pUpload]);
-  const { ETag } = await pUpload;
-
-  // check the etag is the md5 of the source data
-  /* c8 ignore next 3 */
-  if (ETag !== `"${metadata.md5}"`) {
-    throw new Error(`Upload of ${file} to ${url} failed`)
-  }
+  await Promise.all([pPipeline, destStream.done]);
 }
 
-// download
-//
-// download an S3 object to a file, with progress and/or rate limiting
-//
-async function download$1 (url, dest, opts = {}) {
-  const { onProgress, interval = 1000, limit } = opts;
-  const { Bucket, Key } = parseAddress(url);
-
-  const s3 = await getS3();
-  const { ETag, ContentLength: total, atime, mtime, mode, md5 } = await stat$1(
-    url
-  );
-  /* c8 ignore next */
-  const hash = md5 || (!ETag.includes('-') && ETag.replace(/"/g, ''));
-
-  const hasher = hashStream();
-  const speedo$1 = speedo({ total });
-  const streams = [
-    s3.getObject({ Bucket, Key }).createReadStream(),
-    hasher,
-    limit && throttle(limit),
-    onProgress && speedo$1,
-    onProgress && progressStream({ onProgress, interval, speedo: speedo$1 }),
-    createWriteStream(dest)
-  ].filter(Boolean);
-
-  await pipeline(...streams);
-  /* c8 ignore next 3 */
-  if (hash && hash !== hasher.hash) {
-    throw new Error(`Error downloading ${url} to ${dest}`)
-  }
-
-  if (mode) await chmod(dest, mode & 0o777);
-  if (mtime && atime) await utimes(dest, new Date(atime), new Date(mtime));
+function getHash (url) {
+  if (isS3(url)) return getHash$2(url)
+  else if (isLocal(url)) return getHash$1(url)
+  else throw new Error('Huh? ' + url)
 }
 
-async function deleteObject (url, opts = {}) {
-  const { Bucket, Key } = parseAddress(url);
-  const s3 = await getS3();
+function remove (url) {
+  if (isS3(url)) return remove$2(url)
+  else if (isLocal(url)) return remove$1(url)
+  else throw new Error('Huh? ' + url)
+}
 
-  const request = { Bucket, Key, ...opts };
-  await s3.deleteObject(request).promise();
+function isS3 (url) {
+  return url.startsWith('s3://')
+}
+
+function isLocal (url) {
+  return url.startsWith('file:///')
 }
 
 var SEC = 1e3,
@@ -572,84 +792,69 @@ function report (msg, payload) {
 
 reporter
   .on('list.file', data => {
+    let s = '';
     if (data.long) {
-      let type;
-      let size = '';
-      let time = '';
-
-      if (data.directory) {
-        type = 'D';
-      } else {
-        type = data.storageClass;
-        size = data.human ? fmtSize(data.size) : data.size.toString();
-        if (data.mtime) time = fmtDate(data.mtime);
-      }
-      log(
-        [type.padEnd(1), size.padStart(10), time.padEnd(18), data.key].join(
-          '  '
-        )
-      );
-    } else {
-      log(data.key);
+      s += data.storage.padEnd(1) + '  ';
+      const size = data.human ? fmtSize(data.size) : data.size.toString();
+      s += size.padStart(10) + '  ';
+      s += fmtDate(data.mtime).padEnd(18) + '  ';
     }
+    log(s + data.path);
   })
   .on('list.file.totals', ({ totalSize, totalCount, total, human }) => {
     if (!total) return
     const s = human ? `${fmtSize(totalSize)}B` : `${comma(totalSize)} bytes`;
     log(`\n${s} in ${comma(totalCount)} file${totalCount > 1 ? 's' : ''}`);
   })
-  .on('file.transfer.start', url => log(cyan(url)))
-  .on(
-    'file.transfer.update',
-    ({ bytes, percent, total, taken, eta, speed }) => {
-      log.status(
-        [
-          comma(bytes).padStart(1 + comma(total).length),
-          `${percent.toString().padStart(3)}%`,
-          `time ${format(taken)}`,
-          `eta ${eta < 1000 ? '0s' : format(eta)}`,
-          `rate ${fmtSize(speed)}B/s`
-        ].join(' ')
-      );
-    }
-  )
-  .on('file.transfer.done', ({ bytes, taken, speed, direction }) => {
+  .on('cp', opts => opts.quiet || log(opts.url))
+  .on('cp.start', url => log(cyan(url)))
+  .on('cp.update', data => {
+    const { bytes, percent, total, taken, eta, speed } = data;
+    log.status(
+      [
+        comma(bytes).padStart(1 + comma(total).length),
+        `${percent.toString().padStart(3)}%`,
+        `time ${fmtTime(taken)}`,
+        `eta ${fmtTime(eta)}`,
+        `rate ${fmtSize(speed)}B/s`
+      ].join(' ')
+    );
+  })
+  .on('cp.done', ({ bytes, taken, speed }) => {
     log(
       green(
         [
-          ` ${comma(bytes)} bytes`,
-          direction,
-          `in ${format(taken, true)}`,
+          ` ${comma(bytes)} bytes copied`,
+          `in ${fmtTime(taken)}`,
           `at ${fmtSize((bytes * 1e3) / taken)}B/s`
         ].join(' ')
       )
     );
   })
-  .on('sync.start', () => log.status('Scanning files'))
-  .on('sync.file.start', path => log.status(path))
-  .on('sync.file.hashing', path => log.status(`${path} - hashing`))
-  .on('sync.file.dryrun', ({ path, action }) =>
-    log(`${path} - ${action} (dry run)`)
+  .on('cp.dryrun', ({ url }) => log(`${url} - copied (dry run)`))
+  .on('sync.scan.start', ({ kind }) => log.status(`Scanning ${kind} ... `))
+  .on('sync.scan', ({ kind, count }) =>
+    log.status(`Scanning ${kind} ... ${count}`)
   )
-  .on('sync.done', ({ count }) =>
+  .on('sync.scan.done', () => log.status(''))
+  .on('sync.start', () => log.status('Scanning files'))
+  .on('sync.hash', url => log.status(`${url} - hashing`))
+  .on('sync.done', count =>
     log(`${comma(count)} file${count > 1 ? 's' : ''} processed.`)
   )
-  .on('delete.file.start', path => log.status(`${path} - deleting `))
-  .on('delete.file.done', path => log(`${path} - deleted`))
+  .on('rm.dryrun', url => log(`${url} - deleted (dry run)`))
+  .on('rm', url => log(`${url} - deleted`))
   .on('retry', ({ delay, error }) => {
     console.error(
-      `\nError occured: ${error.message}\nWaiting ${format(delay)} to retry...`
+      `\nError occured: ${error.message}\nWaiting ${fmtTime(delay)} to retry...`
     );
-  })
-  .on('stat.start', url => log(url + '\n'))
-  .on('stat.details', ({ key, value, width }) =>
-    log(
-      [
-        green(`${key}:`.padEnd(width + 2)),
-        value instanceof Date ? fmtDate(value) : value
-      ].join('')
-    )
-  );
+  });
+
+function fmtTime (ms) {
+  if (ms < 1000) ms = 1000 * Math.round(ms / 1000);
+  if (!ms) return '0s'
+  return format(ms)
+}
 
 function fmtSize (n) {
   const suffixes = [
@@ -673,39 +878,23 @@ function comma (n) {
 }
 
 const fmtDate = tinydate('{DD}-{MMM}-{YY} {HH}:{mm}:{ss}', {
-  MMM: d => d.toLocaleString(undefined, { month: 'short' })
+  MMM: d => d.toLocaleString(undefined, { month: 'short' }).slice(0, 3)
 });
 
 async function ls (url, options) {
-  const { directory } = options;
-  if (directory && !url.endsWith('/')) url += '/';
-
   let totalCount = 0;
   let totalSize = 0;
 
-  const fileStream = scan(url, {
-    Delimiter: directory ? '/' : undefined
+  const lister = list(url);
+  lister.on('files', files => {
+    files.forEach(file => {
+      totalCount++;
+      totalSize += file.size || 0;
+      file.storage = STORAGE_CLASS[file.storage] || 'F';
+      report('list.file', { ...options, ...file });
+    });
   });
-
-  for await (const {
-    Key,
-    Prefix,
-    Size,
-    LastModified,
-    StorageClass
-  } of fileStream) {
-    if (Key && Key.endsWith('/')) continue
-
-    totalCount++;
-    totalSize += Size || 0;
-
-    const storageClass = STORAGE_CLASS[StorageClass] || '?';
-    const key = Prefix || Key;
-    const mtime = LastModified;
-    const size = Size;
-
-    report('list.file', { ...options, key, mtime, size, storageClass });
-  }
+  await lister.done;
   report('list.file.totals', { ...options, totalSize, totalCount });
 }
 
@@ -742,462 +931,97 @@ retry.exponential = x => n => Math.round(n * x);
 
 const sleep = delay => new Promise(resolve => setTimeout(resolve, delay));
 
-function upload (file, url, { progress, limit }) {
+const validProtocols = /^(?:s3|file):\/\//;
+
+function validateUrl (url, { dir } = {}) {
+  if (url.startsWith('/')) url = 'file://' + url;
+  if (!validProtocols.test(url)) {
+    throw new Error('Unknown type of URI: ' + url)
+  }
+  if (dir && !url.endsWith('/')) url += '/';
+  return url
+}
+
+async function cp (fromUrl, toUrl, opts) {
+  fromUrl = validateUrl(fromUrl);
+  toUrl = validateUrl(toUrl);
+
+  const { limit, progress, dryRun } = opts;
+  if (dryRun) return report('cp.dryrun', { url: toUrl })
+
+  const copyOpts = {
+    limit,
+    onProgress: progress ? doProgress(toUrl) : undefined
+  };
   const retryOpts = {
     retries: 5,
     delay: 5000,
     onRetry: data => report('retry', data)
   };
-  const s3opts = { onProgress: !!progress && doProgress$1(url), limit };
-  return retry(() => upload$1(file, url, s3opts), retryOpts)
+
+  await retry(() => copy(fromUrl, toUrl, copyOpts), retryOpts);
+  if (!progress) {
+    report('cp', { url: toUrl, ...opts });
+  }
 }
 
-function doProgress$1 (url) {
-  report('file.transfer.start', url);
-  const direction = 'uploaded';
+function doProgress (url) {
+  report('cp.start', url);
   return data => {
     const { bytes, done, speedo } = data;
     const { percent, total, taken, eta, rate: speed } = speedo;
-    const payload = { bytes, percent, total, taken, eta, speed, direction };
-    report(`file.transfer.${done ? 'done' : 'update'}`, payload);
+    const payload = { bytes, percent, total, eta, speed, taken };
+    report(`cp.${done ? 'done' : 'update'}`, payload);
   }
 }
 
-function download (url, file, { progress, limit }) {
-  const retryOpts = {
-    retries: 5,
-    delay: 5000,
-    onRetry: data => report('retry', data)
-  };
-  const s3opts = { onProgress: !!progress && doProgress(url), limit };
-  return retry(() => download$1(url, file, s3opts), retryOpts)
+async function rm (url, opts) {
+  url = validateUrl(url);
+  const { dryRun } = opts;
+  if (dryRun) return report('rm.dryrun', url)
+  report('rm', url);
+  await remove(url);
 }
 
-function doProgress (dest) {
-  report('file.transfer.start', resolve(dest));
-  const direction = 'downloaded';
-  return data => {
-    const { bytes, done, speedo } = data;
-    const { total, percent, eta, taken, rate: speed } = speedo;
-    const payload = { bytes, percent, total, taken, eta, speed, direction };
-    report(`file.transfer.${done ? 'done' : 'update'}`, payload);
-  }
-}
+async function sync (srcRoot, dstRoot, opts) {
+  srcRoot = validateUrl(srcRoot, { dir: true });
+  dstRoot = validateUrl(dstRoot, { dir: true });
 
-function uniq (...values) {
-  return [...new Set([].concat(...values))]
-}
+  await scanFiles(srcRoot, 'src', 'source');
+  await scanFiles(dstRoot, 'dst', 'destination');
+  report('sync.scan.done');
 
-class Stream {
-  constructor (source, selector) {
-    Object.assign(this, {
-      source,
-      selector,
-      done: false,
-      value: undefined,
-      key: undefined,
-      missed: new Map()
-    });
+  for (const { url, path } of selectMissingFiles()) {
+    await cp(url, dstRoot + path, { ...opts, progress: true });
   }
 
-  async read () {
-    if (this.done) return
-    const { done, value } = await this.source.next();
-    if (done) {
-      this.done = true;
-      this.value = this.key = null;
-    } else {
-      this.value = value;
-      this.key = this.selector(value);
-    }
-    return this.value
+  for (const url of selectMissingHashes()) {
+    report('sync.hash', url);
+    await getHash(url);
   }
 
-  async readIfOn (key, store) {
-    if (this.key !== key) return this.value
-    if (store) this.missed.set(this.key, this.value);
-    return this.read()
+  for (const { from, to } of selectChanged()) {
+    await cp(from, to, { ...opts, progress: true });
   }
 
-  has (key) {
-    // do we have this, either missed or current
-    return this.key === key || this.missed.has(key)
-  }
-
-  get (key) {
-    // return the item (current or missed)
-    if (this.key === key) return this.value
-    const value = this.missed.get(key);
-    this.missed.delete(key);
-    return value || null
-  }
-
-  keys () {
-    return [...this.missed.keys()]
-  }
-}
-
-function makeSelector (key) {
-  return typeof key === 'function' ? key : record => record[key]
-}
-
-function allSame (vals) {
-  for (let i = 1; i < vals.length; i++) {
-    if (vals[i] !== vals[0]) return false
-  }
-  return true
-}
-
-function earliest (vals) {
-  let ret;
-  for (let i = 0; i < vals.length; i++) {
-    if (!ret || vals[i] < ret) ret = vals[i];
-  }
-  return ret
-}
-
-async function * weave (keyFunc, ...sources) {
-  if (!sources.length) return
-  const selector = makeSelector(keyFunc);
-  const streams = sources.map(source => new Stream(source, selector));
-
-  await read(streams);
-  while (!streams.every(stream => stream.done)) {
-    const keys = streams.map(stream => stream.key);
-    if (allSame(keys)) {
-      const key = keys[0];
-      yield valueFor(streams, key);
-      await read(streams);
-    } else {
-      const key = earliest(keys);
-      if (streams.every(stream => stream.has(key))) {
-        yield valueFor(streams, key);
-        await read(streams, key);
-      } else {
-        await read(streams, key, true);
-      }
+  if (opts.delete) {
+    for (const url of selectSurplusFiles()) {
+      await rm(url, opts);
     }
   }
-
-  const keys = uniq(...streams.map(stream => stream.keys()));
-  for (const key of keys) {
-    yield valueFor(streams, key);
-  }
+  report('sync.done', countFiles());
 }
 
-function read (streams, key, store) {
-  if (key) {
-    return Promise.all(streams.map(stream => stream.readIfOn(key, store)))
-  } else {
-    return Promise.all(streams.map(stream => stream.read()))
-  }
-}
-
-function valueFor (streams, key) {
-  return [key, ...streams.map(stream => stream.get(key))]
-}
-
-async function * filescan (options) {
-  if (typeof options === 'string') options = { path: options };
-  let { path: root, prune, depth } = options;
-  if (!prune) prune = [];
-  if (!Array.isArray(prune)) prune = [prune];
-  prune = new Set(prune.map(path => join(root, path)));
-
-  yield * scan(root);
-
-  async function * scan (path) {
-    if (prune.has(path)) return
-    const stats = await lstat(path);
-    if (!stats.isDirectory()) {
-      yield { path, stats };
-      return
-    }
-    let files = await readdir(path);
-    files.sort();
-    if (!depth) yield { path, stats, files };
-    for (const file of files) {
-      yield * scan(join(path, file));
-    }
-    if (depth) {
-      files = await readdir(path);
-      files.sort();
-      yield { path, stats, files };
-    }
-  }
-}
-
-const db = new SQLite3(resolve(homedir(), '.databases', 'files.sqlite'));
-
-const selectLocal = db.prepare(
-  "SELECT 'file://' || path AS url, mtime, size, hash " +
-    'FROM local_files ORDER BY url ASC;'
-);
-const selectS3 = db.prepare(
-  "SELECT 's3://' || bucket || '/' || path AS url, mtime, size, hash " +
-    'FROM s3_files ORDER BY url ASC;'
-);
-
-function * rows (prefix, filter) {
-  if (!prefix.endsWith('/')) prefix += '/';
-  let select;
-  if (prefix.startsWith('file://')) select = selectLocal;
-  else if (prefix.startsWith('s3://')) select = selectS3;
-  else select = { all: () => [] };
-  for (const row of select.all()) {
-    if (!row.url.startsWith(prefix)) continue
-    const path = row.url.slice(prefix.length);
-    if (!filter(path)) continue
-    yield { ...row, path };
-  }
-}
-
-const replaceLocal = db.prepare(
-  'REPLACE INTO local_files(path, mtime, size, hash) ' +
-    'VALUES($path, $mtime, $size, $hash);'
-);
-const replaceS3 = db.prepare(
-  'REPLACE INTO s3_files(bucket, path, mtime, size, hash) ' +
-    'VALUES($bucket, $path, $mtime, $size, $hash);'
-);
-
-function store ({ url, mtime, size, hash }) {
-  if (url.startsWith('file://')) {
-    const path = url.slice(7);
-    replaceLocal.run({ path, mtime, size, hash });
-  } else if (url.startsWith('s3://')) {
-    const u = new URL(url);
-    const bucket = u.hostname;
-    const path = u.pathname.replace(/^\//, '');
-    replaceS3.run({ bucket, path, mtime, size, hash });
-  }
-}
-
-const deleteLocal = db.prepare('DELETE FROM local_files WHERE path = $path;');
-const deleteS3 = db.prepare(
-  'DELETE FROM s3_files WHERE bucket = $bucket AND path = $path;'
-);
-function remove ({ url }) {
-  if (url.startsWith('file://')) {
-    const path = url.slice(7);
-    deleteLocal.run({ path });
-  } else if (url.startsWith('s3://')) {
-    const u = new URL(url);
-    const bucket = u.hostname;
-    const path = u.pathname.replace(/^\//, '');
-    deleteS3.run({ bucket, path });
-  }
-}
-
-function compact () {}
-
-async function getDB () {
-  return { rows, store, remove, compact }
-}
-
-class Local extends EventEmitter {
-  constructor (data) {
-    super();
-    Object.assign(this, data);
-  }
-
-  static async * files (root, filter) {
-    for await (const { path: fullpath, stats } of filescan(root)) {
-      if (!stats.isFile()) continue
-      const path = relative(root, fullpath);
-      if (!filter(path)) continue
-      yield new Local({ path, fullpath, root, stats });
-    }
-  }
-
-  static async * hashes (root, filter) {
-    const db = await getDB();
-    yield * db.rows('file://' + root, filter);
-  }
-
-  async getHash (row) {
-    const stats = this.stats;
-    if (row && stats.mtimeMs === row.mtime && stats.size === row.size) {
-      this.hash = row.hash;
-      return
-    }
-
-    this.emit('hashing');
-    this.hash = await hashFile(this.fullpath);
-
-    const db = await getDB();
-    await db.store({
-      url: `file://${join(this.root, this.path)}`,
-      mtime: this.stats.mtimeMs,
-      size: this.stats.size,
-      hash: this.hash
-    });
-  }
-}
-
-class Remote extends EventEmitter {
-  constructor (data) {
-    super();
-    Object.assign(this, data);
-  }
-
-  static async * files (root, filter) {
-    const { Bucket, Key: Prefix } = parseAddress(root);
-    for await (const data of scan(root + '/')) {
-      const path = relative(Prefix, data.Key);
-      if (data.Key.endsWith('/') || !filter(path)) continue
-      yield new Remote({
-        path,
-        root,
-        url: `s3://${Bucket}/${data.Key}`,
-        mtime: +data.LastModified,
-        size: data.Size
-      });
-    }
-  }
-
-  static async * hashes (root, filter) {
-    const db = await getDB();
-    yield * db.rows(root, filter);
-  }
-
-  async getHash (row) {
-    if (row && row.mtime === this.mtime && row.size === this.size) {
-      this.hash = row.hash;
-      return
-    }
-
-    this.emit('hashing');
-    const stats = await stat$1(this.url);
-    this.hash = stats.md5 || 'UNKNOWN';
-
-    const db = await getDB();
-    await db.store({
-      url: this.url,
-      mtime: this.mtime,
-      size: this.size,
-      hash: this.hash
-    });
-  }
-}
-
-async function rm (url) {
-  report('delete.file.start', url);
-  await deleteObject(url);
-  report('delete.file.done', url);
-}
-
-async function sync (
-  lRoot,
-  rRoot,
-  { dryRun, download: downsync, delete: deleteExtra, ...options }
-) {
-  report('sync.start');
-  lRoot = await realpath(resolve(lRoot.replace(/\/$/, '')));
-  rRoot = rRoot.replace(/\/$/, '');
-
-  const filter = getFilter(options);
-  const lFiles = Local.files(lRoot, filter);
-  const lHashes = Local.hashes(lRoot, filter);
-  const rFiles = Remote.files(rRoot, filter);
-  const rHashes = Remote.hashes(rRoot, filter);
-
-  let fileCount = 0;
-  const items = weave('path', lFiles, lHashes, rFiles, rHashes);
-
-  for await (const item of items) {
-    fileCount++;
-    const [path, local, lrow, remote, rrow] = item;
-    if (path) report('sync.file.start', path);
-
-    if (local) {
-      local.on('hashing', () => report('sync.file.hashing', path));
-      await local.getHash(lrow);
-    }
-
-    if (remote) {
-      remote.on('hashing', () => report('sync.file.hashing', path));
-      await remote.getHash(rrow);
-    }
-
-    if (local && remote) {
-      if (local.hash === remote.hash) continue
-      if (downsync) {
-        await downloadFile(remote.url, lRoot, path);
-      } else {
-        await uploadFile(local.fullpath, rRoot, path);
-      }
-    } else if (local) {
-      if (downsync) {
-        if (deleteExtra) {
-          await deleteLocal(lRoot, path);
-        }
-      } else {
-        await uploadFile(local.fullpath, rRoot, path);
-      }
-    } else if (remote) {
-      if (downsync) {
-        await downloadFile(remote.url, lRoot, path);
-      } else {
-        if (deleteExtra) {
-          await deleteRemote(rRoot, path);
-        }
-      }
-    } else {
-      const db = await getDB();
-
-      if (lrow) await db.remove(lrow);
-      if (rrow) await db.remove(rrow);
-    }
-  }
-  await getDB().then(db => db.compact());
-
-  report('sync.done', { count: fileCount });
-
-  async function uploadFile (file, rRoot, path, action = 'upload') {
-    if (dryRun) return report('sync.file.dryrun', { path, action })
-    return upload(file, `${rRoot}/${path}`, { ...options, progress: true })
-  }
-
-  async function downloadFile (url, lRoot, path, action = 'download') {
-    if (dryRun) return report('sync.file.dryrun', { path, action })
-    return download(url, join(lRoot, path), { ...options, progress: true })
-  }
-
-  async function deleteLocal (lRoot, path, action = 'delete') {
-    if (dryRun) return report('sync.file.dryrun', { path, action })
-    return unlink(join(lRoot, path))
-  }
-
-  async function deleteRemote (rRoot, path, action = 'delete') {
-    if (dryRun) return report('sync.file.dryrun', { path, action })
-    return rm(`${rRoot}/${path}`)
-  }
-}
-
-function getFilter ({ filter }) {
-  if (!filter) return () => true
-  const rgx = new RegExp(filter);
-  return x => rgx.test(x)
-}
-
-async function stat (url) {
-  const data = await stat$1(url);
-  const results = [];
-  for (let [k, v] of Object.entries(data)) {
-    k = k.charAt(0).toLowerCase() + k.slice(1);
-    if (k === 'metadata') continue
-    if (k.endsWith('time')) v = new Date(v * 1000);
-    if (k === 'mode') v = '0o' + v.toString(8);
-    results.push([k, v]);
-  }
-  results.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  const width = Math.max(...results.map(x => x[0].length));
-  report('stat.start', url);
-  for (const [key, value] of results) {
-    report('stat.details', { key, value, width });
-  }
-  report('stat.done', url);
+async function scanFiles (root, type, desc) {
+  report('sync.scan.start', { kind: desc });
+  let count = 0;
+  const lister = list(root);
+  lister.on('files', files => {
+    count += files.length;
+    report('sync.scan', { kind: desc, count });
+    insertSyncFiles(type, files);
+  });
+  await lister.done;
 }
 
 const prog = sade('s3cli');
@@ -1206,43 +1030,29 @@ const version = '1.9.0';
 prog.version(version);
 
 prog
-  .command('ls <s3url>', 'list the objects in a bucket')
+  .command('ls <url>', 'list the files under a dir')
   .option('-l, --long', 'show more detail')
   .option('-t, --total', 'include a total in long listing')
   .option('-H, --human', 'show human sizes in long listing')
-  .option('-d, --directory', 'list directories without recursing')
   .action(ls);
 
 prog
-  .command('upload <file> <s3url>', 'upload a file to S3')
+  .command('cp <from> <to>', 'copy a file to/from S3')
   .option('-p, --progress', 'show progress')
   .option('-l, --limit', 'limit rate')
-  .action(upload);
+  .option('-q, --quiet', 'no output')
+  .action(cp);
 
 prog
-  .command('download <s3url> <file>', 'download a file from S3')
-  .option('-p, --progress', 'show progress')
+  .command('sync <from> <to>', 'sync a directory to/from S3')
   .option('-l, --limit', 'limit rate')
-  .action(download);
-
-prog
-  .command('sync <dir> <s3url>', 'sync a directory with S3')
-  .option('-p, --progress', 'show progress')
-  .option('-l, --limit', 'limit rate')
-  .option('-f, --filter', 'regex to limit the files synced')
   .option('-n, --dry-run', 'show what would be done')
   .option('-d, --delete', 'delete extra files on the destination')
-  .option('-D, --download', 'sync from S3 down to local')
   .action(sync);
 
 prog
-  .command('stat <s3url>')
-  .describe('show details about a file')
-  .action(stat);
-
-prog
-  .command('rm <s3url>')
-  .describe('delete a remote file')
+  .command('rm <url>')
+  .describe('delete a file')
   .action(rm);
 
 const parsed = prog.parse(process.argv, {

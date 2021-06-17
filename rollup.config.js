@@ -8,7 +8,7 @@ export default {
     'stream/promises',
     'aws-sdk',
     'better-sqlite3',
-    'mime/lite.js',
+    'mime',
     'sade'
   ],
   plugins: [
