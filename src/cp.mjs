@@ -4,7 +4,7 @@ import { copy } from './vfs.mjs'
 import { validateUrl } from './util.mjs'
 import report from './report.mjs'
 
-export default async function cp (fromUrl, toUrl, opts) {
+export default async function cp (fromUrl, toUrl, opts = {}) {
   fromUrl = validateUrl(fromUrl)
   toUrl = validateUrl(toUrl)
 

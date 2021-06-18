@@ -14,13 +14,6 @@ db.exec(ddl)
 
 for (const k in sql) sql[k] = db.prepare(sql[k])
 
-export const insertHashes = db.transaction(hashes => {
-  for (const { url, mtime: _mtime, size, hash } of hashes) {
-    const mtime = _mtime.toISOString()
-    sql.insertHash.run({ url, mtime, size, hash })
-  }
-})
-
 export const insertSyncFiles = db.transaction((type, files) => {
   for (const { path, url, mtime: _mtime, size } of files) {
     const mtime = _mtime.toISOString()
@@ -48,6 +41,10 @@ export function countFiles () {
   return sql.countFiles.pluck().get()
 }
 
+export function clearSync () {
+  return sql.clearSync.run()
+}
+
 export function selectHash ({ url, mtime: _mtime, size }) {
   const mtime = _mtime.toISOString()
   return sql.selectHash.pluck().get({ url, mtime, size })
@@ -56,4 +53,8 @@ export function selectHash ({ url, mtime: _mtime, size }) {
 export function insertHash ({ url, mtime: _mtime, size, hash }) {
   const mtime = _mtime.toISOString()
   sql.insertHash.run({ url, mtime, size, hash })
+}
+
+export function deleteHash ({ url }) {
+  sql.deleteHash.run({ url })
 }

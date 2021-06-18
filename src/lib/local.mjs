@@ -5,13 +5,14 @@ import {
   realpath,
   chmod,
   utimes,
-  unlink
+  unlink,
+  mkdir
 } from 'fs/promises'
 import {
   createReadStream as fsCreateReadStream,
   createWriteStream as fsCreateWriteStream
 } from 'fs'
-import { extname } from 'path'
+import { dirname, extname } from 'path'
 
 import mime from 'mime'
 
@@ -101,6 +102,7 @@ export async function createReadStream (url) {
 
 export async function createWriteStream (url, source) {
   const path = url.slice(7)
+  await mkdir(dirname(path), { recursive: true })
   const { attrs } = source
   const mtime = attrs && attrs.mtime
   const mode = attrs && attrs.mode

@@ -1,4 +1,5 @@
 import {
+  clearSync,
   insertSyncFiles,
   selectMissingFiles,
   selectMissingHashes,
@@ -12,10 +13,11 @@ import { list, getHash } from './vfs.mjs'
 import report from './report.mjs'
 import { validateUrl } from './util.mjs'
 
-export default async function sync (srcRoot, dstRoot, opts) {
+export default async function sync (srcRoot, dstRoot, opts = {}) {
   srcRoot = validateUrl(srcRoot, { dir: true })
   dstRoot = validateUrl(dstRoot, { dir: true })
 
+  clearSync()
   await scanFiles(srcRoot, 'src', 'source')
   await scanFiles(dstRoot, 'dst', 'destination')
   report('sync.scan.done')

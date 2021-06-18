@@ -6,17 +6,18 @@ import createSpeedo from 'speedo/gen'
 
 import * as s3 from './lib/s3.mjs'
 import * as local from './lib/local.mjs'
+import { deleteHash } from './db/index.mjs'
 
 export function list (url) {
   if (isS3(url)) return s3.list(url)
   else if (isLocal(url)) return local.list(url)
-  else throw new Error('Huh? ' + url)
+  /* c8 ignore next */ else throw new Error('Huh? ' + url)
 }
 
 export async function stat (url) {
   if (isS3(url)) return s3.stat(url)
   else if (isLocal(url)) return local.stat(url)
-  else throw new Error('Huh? ' + url)
+  /* c8 ignore next */ else throw new Error('Huh? ' + url)
 }
 
 export async function copy (srcUrl, dstUrl, opts = {}) {
@@ -47,15 +48,17 @@ export async function copy (srcUrl, dstUrl, opts = {}) {
 }
 
 export function getHash (url) {
+  /* c8 ignore next */
   if (isS3(url)) return s3.getHash(url)
   else if (isLocal(url)) return local.getHash(url)
-  else throw new Error('Huh? ' + url)
+  /* c8 ignore next */ else throw new Error('Huh? ' + url)
 }
 
-export function remove (url) {
-  if (isS3(url)) return s3.remove(url)
-  else if (isLocal(url)) return local.remove(url)
-  else throw new Error('Huh? ' + url)
+export async function remove (url) {
+  if (isS3(url)) await s3.remove(url)
+  else if (isLocal(url)) await local.remove(url)
+  /* c8 ignore next */ else throw new Error('Huh? ' + url)
+  deleteHash({ url })
 }
 
 function isS3 (url) {

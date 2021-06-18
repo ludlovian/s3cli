@@ -11,6 +11,7 @@ export default function report (msg, payload) {
   reporter.emit(msg, payload)
 }
 
+/* c8 ignore start */
 reporter
   .on('list.file', data => {
     let s = ''
@@ -101,3 +102,4 @@ function comma (n) {
 const fmtDate = tinydate('{DD}-{MMM}-{YY} {HH}:{mm}:{ss}', {
   MMM: d => d.toLocaleString(undefined, { month: 'short' }).slice(0, 3)
 })
+/* c8 ignore end */

@@ -96,6 +96,15 @@ sql.countFiles = t`
     WHERE type = 'src'
 `
 
+sql.clearSync = t`
+  DELETE FROM sync
+`
+
+sql.deleteHash = t`
+  DELETE FROM hash
+    WHERE url = $url
+`
+
 function t (strings) {
   return strings
     .map(s => s.split('\n'))

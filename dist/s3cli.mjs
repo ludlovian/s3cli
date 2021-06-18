@@ -5,9 +5,9 @@ import EventEmitter, { EventEmitter as EventEmitter$1 } from 'events';
 import { PassThrough } from 'stream';
 import AWS from 'aws-sdk';
 import { homedir } from 'os';
-import { resolve, extname } from 'path';
+import { resolve, extname, dirname } from 'path';
 import SQLite from 'better-sqlite3';
-import { realpath, readdir, stat as stat$1, chmod, utimes, unlink } from 'fs/promises';
+import { realpath, readdir, stat as stat$1, mkdir, chmod, utimes, unlink } from 'fs/promises';
 import { createReadStream as createReadStream$2, createWriteStream as createWriteStream$2 } from 'fs';
 import mime from 'mime';
 import { createHash } from 'crypto';
@@ -238,6 +238,15 @@ sql.countFiles = t`
     WHERE type = 'src'
 `;
 
+sql.clearSync = t`
+  DELETE FROM sync
+`;
+
+sql.deleteHash = t`
+  DELETE FROM hash
+    WHERE url = $url
+`;
+
 function t (strings) {
   return strings
     .map(s => s.split('\n'))
@@ -254,13 +263,6 @@ db.pragma('journal_mode=WAL');
 db.exec(ddl);
 
 for (const k in sql) sql[k] = db.prepare(sql[k]);
-
-db.transaction(hashes => {
-  for (const { url, mtime: _mtime, size, hash } of hashes) {
-    const mtime = _mtime.toISOString();
-    sql.insertHash.run({ url, mtime, size, hash });
-  }
-});
 
 const insertSyncFiles = db.transaction((type, files) => {
   for (const { path, url, mtime: _mtime, size } of files) {
@@ -289,6 +291,10 @@ function countFiles () {
   return sql.countFiles.pluck().get()
 }
 
+function clearSync () {
+  return sql.clearSync.run()
+}
+
 function selectHash ({ url, mtime: _mtime, size }) {
   const mtime = _mtime.toISOString();
   return sql.selectHash.pluck().get({ url, mtime, size })
@@ -297,6 +303,10 @@ function selectHash ({ url, mtime: _mtime, size }) {
 function insertHash ({ url, mtime: _mtime, size, hash }) {
   const mtime = _mtime.toISOString();
   sql.insertHash.run({ url, mtime, size, hash });
+}
+
+function deleteHash ({ url }) {
+  sql.deleteHash.run({ url });
 }
 
 const getS3 = once(async () => {
@@ -330,6 +340,7 @@ function list$2 (baseurl) {
         return file
       });
       if (files.length) lister.emit('files', files);
+      /* c8 ignore next 3 */
       if (!result.IsTruncated) break
       request.ContinuationToken = result.NextContinuationToken;
     }
@@ -521,6 +532,7 @@ async function createReadStream (url) {
 
 async function createWriteStream (url, source) {
   const path = url.slice(7);
+  await mkdir(dirname(path), { recursive: true });
   const { attrs } = source;
   const mtime = attrs && attrs.mtime;
   const mode = attrs && attrs.mode;
@@ -544,7 +556,7 @@ async function remove$1 (url) {
 function list (url) {
   if (isS3(url)) return list$2(url)
   else if (isLocal(url)) return list$1(url)
-  else throw new Error('Huh? ' + url)
+  /* c8 ignore next */ else throw new Error('Huh? ' + url)
 }
 
 async function copy (srcUrl, dstUrl, opts = {}) {
@@ -575,15 +587,17 @@ async function copy (srcUrl, dstUrl, opts = {}) {
 }
 
 function getHash (url) {
+  /* c8 ignore next */
   if (isS3(url)) return getHash$2(url)
   else if (isLocal(url)) return getHash$1(url)
-  else throw new Error('Huh? ' + url)
+  /* c8 ignore next */ else throw new Error('Huh? ' + url)
 }
 
-function remove (url) {
-  if (isS3(url)) return remove$2(url)
-  else if (isLocal(url)) return remove$1(url)
-  else throw new Error('Huh? ' + url)
+async function remove (url) {
+  if (isS3(url)) await remove$2(url);
+  else if (isLocal(url)) await remove$1(url);
+  /* c8 ignore next */ else throw new Error('Huh? ' + url)
+  deleteHash({ url });
 }
 
 function isS3 (url) {
@@ -790,6 +804,7 @@ function report (msg, payload) {
   reporter.emit(msg, payload);
 }
 
+/* c8 ignore start */
 reporter
   .on('list.file', data => {
     let s = '';
@@ -880,6 +895,7 @@ function comma (n) {
 const fmtDate = tinydate('{DD}-{MMM}-{YY} {HH}:{mm}:{ss}', {
   MMM: d => d.toLocaleString(undefined, { month: 'short' }).slice(0, 3)
 });
+/* c8 ignore end */
 
 async function ls (url, options) {
   let totalCount = 0;
@@ -935,14 +951,16 @@ const validProtocols = /^(?:s3|file):\/\//;
 
 function validateUrl (url, { dir } = {}) {
   if (url.startsWith('/')) url = 'file://' + url;
+  /* c8 ignore next 3 */
   if (!validProtocols.test(url)) {
     throw new Error('Unknown type of URI: ' + url)
   }
+  /* c8 ignore next */
   if (dir && !url.endsWith('/')) url += '/';
   return url
 }
 
-async function cp (fromUrl, toUrl, opts) {
+async function cp (fromUrl, toUrl, opts = {}) {
   fromUrl = validateUrl(fromUrl);
   toUrl = validateUrl(toUrl);
 
@@ -975,7 +993,7 @@ function doProgress (url) {
   }
 }
 
-async function rm (url, opts) {
+async function rm (url, opts = {}) {
   url = validateUrl(url);
   const { dryRun } = opts;
   if (dryRun) return report('rm.dryrun', url)
@@ -983,10 +1001,11 @@ async function rm (url, opts) {
   await remove(url);
 }
 
-async function sync (srcRoot, dstRoot, opts) {
+async function sync (srcRoot, dstRoot, opts = {}) {
   srcRoot = validateUrl(srcRoot, { dir: true });
   dstRoot = validateUrl(dstRoot, { dir: true });
 
+  clearSync();
   await scanFiles(srcRoot, 'src', 'source');
   await scanFiles(dstRoot, 'dst', 'destination');
   report('sync.scan.done');

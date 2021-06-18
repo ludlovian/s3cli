@@ -37,6 +37,7 @@ export function list (baseurl) {
         return file
       })
       if (files.length) lister.emit('files', files)
+      /* c8 ignore next 3 */
       if (!result.IsTruncated) break
       request.ContinuationToken = result.NextContinuationToken
     }
