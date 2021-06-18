@@ -18,8 +18,8 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
   dstRoot = validateUrl(dstRoot, { dir: true })
 
   clearSync()
-  await scanFiles(srcRoot, 'src', 'source')
-  await scanFiles(dstRoot, 'dst', 'destination')
+  await scanFiles(srcRoot, 'src', 'source', opts.filter)
+  await scanFiles(dstRoot, 'dst', 'destination', opts.filter)
   report('sync.scan.done')
 
   for (const { url, path } of selectMissingFiles()) {
@@ -43,11 +43,16 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
   report('sync.done', countFiles())
 }
 
-async function scanFiles (root, type, desc) {
+async function scanFiles (root, type, desc, filter) {
+  if (filter) {
+    const r = new RegExp(filter)
+    filter = x => r.test(x.path)
+  }
   report('sync.scan.start', { kind: desc })
   let count = 0
   const lister = list(root)
   lister.on('files', files => {
+    if (filter) files = files.filter(filter)
     count += files.length
     report('sync.scan', { kind: desc, count })
     insertSyncFiles(type, files)

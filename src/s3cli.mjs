@@ -29,6 +29,7 @@ prog
   .option('-l, --limit', 'limit rate')
   .option('-n, --dry-run', 'show what would be done')
   .option('-d, --delete', 'delete extra files on the destination')
+  .option('-f, --filter', 'apply a regexp filter to the pathnames')
   .action(sync)
 
 prog
