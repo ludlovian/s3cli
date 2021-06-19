@@ -1,12 +1,12 @@
 {
   "name": "s3cli",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Simple CLI for AWS S3",
   "scripts": {
     "test": "c8 uvu",
     "format": "prettier-standard '{src,test}/**/*.mjs'",
     "lint": "standard '{src,test}/**/*.mjs' | snazzy",
-    "buildsql" : "node tools/make-sql.mjs src/sql/ > src/db/sql.mjs",
+    "buildsql": "node tools/make-sql.mjs src/sql/ > src/db/sql.mjs",
     "build": "rollup -c rollup.config.js",
     "postbuild": "chmod +x dist/s3cli.mjs",
     "version": "npm run build && git add dist/s3cli.mjs"
@@ -43,8 +43,8 @@
     "uvu": "^0.5.1"
   },
   "standard": {
-      "ignore": [
-          "src/db/sql.mjs"
-      ]
+    "ignore": [
+      "src/db/sql.mjs"
+    ]
   }
 }
