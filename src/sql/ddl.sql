@@ -10,7 +10,7 @@ DROP TABLE IF EXISTS sync;
 CREATE TEMP TABLE IF NOT EXISTS sync (
     "type" TEXT    NOT NULL,
     path   TEXT    NOT NULL,
-    url    TEXT    NOT NULL,
+    url    TEXT    NOT NULL UNIQUE,
     mtime  TEXT    NOT NULL,
     "size" INTEGER NOT NULL,
     PRIMARY KEY ("type", path)
