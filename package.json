@@ -1,6 +1,6 @@
 {
   "name": "s3cli",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "Simple CLI for AWS S3",
   "scripts": {
     "test": "c8 uvu",

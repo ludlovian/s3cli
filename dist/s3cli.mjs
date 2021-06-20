@@ -143,7 +143,7 @@ function once (fn) {
 const sql={};
 sql.clearSync="DELETE FROM sync";
 sql.countFiles="SELECT count(*) FROM sync WHERE \"type\" = 'src'";
-const ddl="CREATE TABLE IF NOT EXISTS hash ( url TEXT NOT NULL PRIMARY KEY, mtime TEXT NOT NULL, \"size\" INTEGER NOT NULL, hash TEXT ); DROP TABLE IF EXISTS sync; CREATE TEMP TABLE IF NOT EXISTS sync ( \"type\" TEXT NOT NULL, path TEXT NOT NULL, url TEXT NOT NULL, mtime TEXT NOT NULL, \"size\" INTEGER NOT NULL, PRIMARY KEY (\"type\", path) );";
+const ddl="CREATE TABLE IF NOT EXISTS hash ( url TEXT NOT NULL PRIMARY KEY, mtime TEXT NOT NULL, \"size\" INTEGER NOT NULL, hash TEXT ); DROP TABLE IF EXISTS sync; CREATE TEMP TABLE IF NOT EXISTS sync ( \"type\" TEXT NOT NULL, path TEXT NOT NULL, url TEXT NOT NULL UNIQUE, mtime TEXT NOT NULL, \"size\" INTEGER NOT NULL, PRIMARY KEY (\"type\", path) );";
 sql.deleteHash="DELETE FROM hash WHERE url = $url";
 sql.insertHash="INSERT INTO hash (url, mtime, \"size\", hash) VALUES ($url, $mtime, $size, $hash) ON CONFLICT DO UPDATE SET mtime = excluded.mtime, \"size\" = excluded.\"size\", hash = excluded.hash";
 sql.insertSync="INSERT INTO sync (\"type\", path, url, mtime, \"size\") VALUES ($type, $path, $url, $mtime, $size)";
@@ -152,6 +152,7 @@ sql.selectHash="SELECT hash FROM hash WHERE url = $url AND mtime = $mtime AND \"
 sql.selectMissingFiles="SELECT src.url AS url, src.path AS path FROM sync src LEFT JOIN sync dst ON src.path = dst.path AND dst.\"type\" = 'dst' WHERE src.\"type\" = 'src' AND dst.path IS NULL ORDER BY src.url";
 sql.selectMissingHashes="SELECT a.url AS url FROM sync a LEFT JOIN hash b ON a.url = b.url AND a.mtime = b.mtime AND a.\"size\" = b.\"size\" WHERE b.hash IS NULL ORDER BY a.url";
 sql.selectSurplusFiles="SELECT dst.url AS url FROM sync dst LEFT JOIN sync src ON src.path = dst.path AND src.\"type\" = 'src' WHERE dst.\"type\" = 'dst' AND src.path IS NULL ORDER BY dst.url";
+sql.updateCopiedSync="UPDATE sync SET mtime = ( SELECT mtime FROM hash WHERE url = $url ), \"size\" = ( SELECT \"size\" FROM hash WHERE url = $url ) WHERE url = $url";
 
 const DB_DIR = process.env.DB_DIR || resolve(homedir(), '.databases');
 const DB_FILE = process.env.DB_FILE || 'files2.sqlite';
@@ -947,7 +948,7 @@ async function scanFiles (root, type, desc, filter) {
 }
 
 const prog = sade('s3cli');
-const version = '2.0.3';
+const version = '2.0.4';
 
 prog.version(version);
 
