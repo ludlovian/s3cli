@@ -1,17 +1,155 @@
 #!/usr/bin/env node
 import sade from 'sade';
+import { homedir } from 'os';
+import { resolve, extname, dirname } from 'path';
+import SQLite from 'better-sqlite3';
 import { pipeline } from 'stream/promises';
 import EventEmitter, { EventEmitter as EventEmitter$1 } from 'events';
 import { PassThrough } from 'stream';
 import AWS from 'aws-sdk';
-import { homedir } from 'os';
-import { resolve, extname, dirname } from 'path';
-import SQLite from 'better-sqlite3';
 import { realpath, readdir, stat as stat$1, mkdir, chmod, utimes, unlink } from 'fs/promises';
 import { createReadStream as createReadStream$2, createWriteStream as createWriteStream$2 } from 'fs';
 import mime from 'mime';
 import { createHash } from 'crypto';
 import { format as format$1 } from 'util';
+
+let db;
+
+const SQL = {
+  from: sql => statement({ sql: tidy(sql) }),
+  attach: _db => (db = _db),
+  transaction: fn => transaction(fn)
+};
+
+function statement (data) {
+  function exec (...args) {
+    if (!data.sqlList) data.sqlList = data.sql.split(';');
+    if (!data.prepared) data.prepared = [];
+    const { prepared, sqlList, pluck, raw, get, all } = data;
+    const n = sqlList.length;
+    for (let i = 0; i < n - 1; i++) {
+      let stmt = prepared[i];
+      if (!stmt) stmt = prepared[i] = db.prepare(sqlList[i]);
+      stmt.run(...args);
+    }
+    let last = prepared[n - 1];
+    if (!last) last = prepared[n - 1] = db.prepare(sqlList[n - 1]);
+    if (pluck) last = last.pluck();
+    if (raw) last = last.raw();
+    if (get) return last.get(...args)
+    if (all) return last.all(...args)
+    return last.run(...args)
+  }
+  return Object.defineProperties(exec, {
+    pluck: { value: () => statement({ ...data, pluck: true }) },
+    raw: { value: () => statement({ ...data, raw: true }) },
+    get: { get: () => statement({ ...data, get: true }) },
+    all: { get: () => statement({ ...data, all: true }) }
+  })
+}
+
+function transaction (_fn) {
+  let fn;
+  return (...args) => {
+    if (!fn) fn = db.transaction(_fn);
+    return fn(...args)
+  }
+}
+
+function tidyStatement (statement) {
+  return statement
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => !line.startsWith('--'))
+    .map(line => line.replaceAll(/  +/g, ' '))
+    .join(' ')
+    .trim()
+}
+
+function tidy (statements) {
+  return statements
+    .split(';')
+    .map(tidyStatement)
+    .filter(Boolean)
+    .join(';')
+}
+
+const clearSync$1=SQL.from("DELETE FROM sync");
+const countFiles$1=SQL.from("SELECT count(*)  FROM sync  WHERE type = 'src'");
+const ddl=SQL.from("CREATE VIEW IF NOT EXISTS dbVersion AS SELECT 3 AS version;CREATE TABLE IF NOT EXISTS hash ( url TEXT NOT NULL PRIMARY KEY, mtime TEXT NOT NULL, size INTEGER NOT NULL, hash TEXT );CREATE TEMP TABLE sync ( type TEXT NOT NULL, path TEXT NOT NULL, url TEXT NOT NULL UNIQUE, mtime TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (type, path) );CREATE TEMP VIEW missingHashes AS SELECT a.url AS url  FROM sync a LEFT JOIN hash b ON b.url = a.url AND b.mtime = a.mtime AND b.size = a.size  WHERE b.hash IS NULL  ORDER BY a.url;CREATE TEMP VIEW missingFiles AS SELECT src.url AS url, src.path AS path  FROM sync src  LEFT JOIN sync dst ON src.path = dst.path AND dst.type = 'dst'  WHERE src.type = 'src' AND dst.path IS NULL  ORDER BY src.url;CREATE TEMP VIEW changedFiles AS SELECT src.url AS src, dst.url AS dst  FROM sync src  JOIN hash srcHash ON srcHash.url = src.url AND srcHash.size = src.size AND srcHash.mtime = src.mtime  JOIN sync dst ON dst.path = src.path AND dst.type = 'dst'  JOIN hash dstHash ON dstHash.url = dst.url AND dstHash.size = dst.size AND dstHash.mtime = dst.mtime  WHERE src.type = 'src' AND srcHash.hash != dstHash.hash  ORDER BY src.url;CREATE TEMP VIEW surplusFiles AS SELECT dst.url AS url  FROM sync dst  LEFT JOIN sync src ON src.path = dst.path AND src.type = 'src'  WHERE dst.type = 'dst' AND src.path IS NULL  ORDER BY dst.url");
+const deleteHash$1=SQL.from("DELETE FROM hash  WHERE url = $url");
+const insertHash$1=SQL.from("INSERT INTO hash (url, mtime, size, hash) VALUES ($url, datetime($mtime), $size, $hash) ON CONFLICT DO UPDATE SET mtime = excluded.mtime, size = excluded.size, hash = excluded.hash");
+const insertSync=SQL.from("INSERT INTO sync (type, path, url, mtime, size) VALUES ($type, $path, $url, datetime($mtime), $size)");
+const selectChanged$1=SQL.from("SELECT src AS \"from\", dst AS \"to\" from changedFiles");
+const selectHash$1=SQL.from("SELECT hash  FROM hash  WHERE url = $url AND mtime = datetime($mtime) AND size = $size");
+const selectMissingFiles$1=SQL.from("SELECT url, path FROM missingFiles");
+const selectMissingHashes$1=SQL.from("SELECT url FROM missingHashes");
+const selectSurplusFiles$1=SQL.from("SELECT url FROM surplusFiles");
+
+const DBVERSION = 3;
+
+let opened;
+function open () {
+  if (opened) return
+  opened = true;
+  const dbFile =
+    process.env.DB || resolve(homedir(), '.databases', 'files2.sqlite');
+  const db = new SQLite(dbFile);
+  SQL.attach(db);
+  ddl();
+  const version = db
+    .prepare('select version from dbversion')
+    .pluck()
+    .get();
+  if (version !== DBVERSION) {
+    throw new Error('Wrong version of database: ' + dbFile)
+  }
+}
+
+const insertSyncFiles = SQL.transaction((type, files) => {
+  for (const { path, url, mtime: _mtime, size } of files) {
+    const mtime = _mtime.toISOString();
+    insertSync({ type, path, url, mtime, size });
+  }
+});
+
+function selectMissingFiles () {
+  return selectMissingFiles$1.all()
+}
+
+function selectMissingHashes () {
+  return selectMissingHashes$1.pluck().all()
+}
+
+function selectChanged () {
+  return selectChanged$1.all()
+}
+
+function selectSurplusFiles () {
+  return selectSurplusFiles$1.pluck().all()
+}
+
+function countFiles () {
+  return countFiles$1.pluck().get()
+}
+
+function clearSync () {
+  return clearSync$1()
+}
+
+function selectHash ({ url, mtime: _mtime, size }) {
+  const mtime = _mtime.toISOString();
+  return selectHash$1.pluck().get({ url, mtime, size })
+}
+
+function insertHash ({ url, mtime: _mtime, size, hash }) {
+  const mtime = _mtime.toISOString();
+  insertHash$1({ url, mtime, size, hash });
+}
+
+function deleteHash ({ url }) {
+  deleteHash$1({ url });
+}
 
 // import assert from 'assert/strict'
 function throttle (options) {
@@ -138,74 +276,6 @@ function once (fn) {
   }
 
   return f
-}
-
-const sql={};
-sql.clearSync="DELETE FROM sync";
-sql.countFiles="SELECT count(*) FROM sync WHERE \"type\" = 'src'";
-const ddl="CREATE TABLE IF NOT EXISTS hash ( url TEXT NOT NULL PRIMARY KEY, mtime TEXT NOT NULL, \"size\" INTEGER NOT NULL, hash TEXT ); DROP TABLE IF EXISTS sync; CREATE TEMP TABLE IF NOT EXISTS sync ( \"type\" TEXT NOT NULL, path TEXT NOT NULL, url TEXT NOT NULL UNIQUE, mtime TEXT NOT NULL, \"size\" INTEGER NOT NULL, PRIMARY KEY (\"type\", path) );";
-sql.deleteHash="DELETE FROM hash WHERE url = $url";
-sql.insertHash="INSERT INTO hash (url, mtime, \"size\", hash) VALUES ($url, datetime($mtime), $size, $hash) ON CONFLICT DO UPDATE SET mtime = excluded.mtime, \"size\" = excluded.\"size\", hash = excluded.hash";
-sql.insertSync="INSERT INTO sync (\"type\", path, url, mtime, \"size\") VALUES ($type, $path, $url, datetime($mtime), $size)";
-sql.selectChanged="SELECT src.url AS \"from\", dst.url AS \"to\" FROM sync src JOIN hash srcHash ON srcHash.url = src.url JOIN sync dst ON dst.path = src.path JOIN hash dstHash ON dstHash.url = dst.url WHERE src.\"type\" = 'src' AND dst.\"type\" = 'dst' AND srcHash.hash != dstHash.hash ORDER BY src.url";
-sql.selectHash="SELECT hash FROM hash WHERE url = $url AND mtime = datetime($mtime) AND \"size\" = $size";
-sql.selectMissingFiles="SELECT src.url AS url, src.path AS path FROM sync src LEFT JOIN sync dst ON src.path = dst.path AND dst.\"type\" = 'dst' WHERE src.\"type\" = 'src' AND dst.path IS NULL ORDER BY src.url";
-sql.selectMissingHashes="SELECT a.url AS url FROM sync a LEFT JOIN hash b ON a.url = b.url AND a.mtime = b.mtime AND a.\"size\" = b.\"size\" WHERE b.hash IS NULL ORDER BY a.url";
-sql.selectSurplusFiles="SELECT dst.url AS url FROM sync dst LEFT JOIN sync src ON src.path = dst.path AND src.\"type\" = 'src' WHERE dst.\"type\" = 'dst' AND src.path IS NULL ORDER BY dst.url";
-sql.updateCopiedSync="UPDATE sync SET mtime = ( SELECT mtime FROM hash WHERE url = $url ), \"size\" = ( SELECT \"size\" FROM hash WHERE url = $url ) WHERE url = $url";
-
-const DB_DIR = process.env.DB_DIR || resolve(homedir(), '.databases');
-const DB_FILE = process.env.DB_FILE || 'files2.sqlite';
-
-const db = new SQLite(resolve(DB_DIR, DB_FILE));
-db.pragma('journal_mode=WAL');
-db.exec(ddl);
-
-for (const k in sql) sql[k] = db.prepare(sql[k]);
-
-const insertSyncFiles = db.transaction((type, files) => {
-  for (const { path, url, mtime: _mtime, size } of files) {
-    const mtime = _mtime.toISOString();
-    sql.insertSync.run({ type, path, url, mtime, size });
-  }
-});
-
-function selectMissingFiles () {
-  return sql.selectMissingFiles.all()
-}
-
-function selectMissingHashes () {
-  return sql.selectMissingHashes.pluck().all()
-}
-
-function selectChanged () {
-  return sql.selectChanged.all()
-}
-
-function selectSurplusFiles () {
-  return sql.selectSurplusFiles.pluck().all()
-}
-
-function countFiles () {
-  return sql.countFiles.pluck().get()
-}
-
-function clearSync () {
-  return sql.clearSync.run()
-}
-
-function selectHash ({ url, mtime: _mtime, size }) {
-  const mtime = _mtime.toISOString();
-  return sql.selectHash.pluck().get({ url, mtime, size })
-}
-
-function insertHash ({ url, mtime: _mtime, size, hash }) {
-  const mtime = _mtime.toISOString();
-  sql.insertHash.run({ url, mtime, size, hash });
-}
-
-function deleteHash ({ url }) {
-  sql.deleteHash.run({ url });
 }
 
 const getS3 = once(async () => {
@@ -749,7 +819,7 @@ reporter
     );
   })
   .on('cp.dryrun', ({ url }) => log(`${url} - copied (dry run)`))
-  .on('sync.scan.start', () => log.status(`Scanning ... `))
+  .on('sync.scan.start', () => log.status('Scanning ... '))
   .on('sync.scan', ({ count }) => log.status(`Scanning ... ${count}`))
   .on('sync.scan.done', () => log.status(''))
   .on('sync.start', () => log.status('Scanning files'))
@@ -953,7 +1023,7 @@ async function sync (srcRoot, dstRoot, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.0.8';
+const version = '2.0.9';
 
 prog.version(version);
 
@@ -990,6 +1060,7 @@ const parsed = prog.parse(process.argv, {
 });
 
 if (parsed) {
+  open();
   const { args, handler } = parsed;
   handler(...args).catch(err => {
     console.error(err);
