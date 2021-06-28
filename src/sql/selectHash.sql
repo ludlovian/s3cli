@@ -4,6 +4,6 @@
 SELECT hash
 FROM   hash
 WHERE  url = $url
-  AND  mtime = $mtime
+  AND  mtime = datetime($mtime)
   AND  "size" = $size
 
