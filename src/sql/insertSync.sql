@@ -4,4 +4,4 @@
 INSERT INTO sync
     ("type", path, url, mtime, "size")
 VALUES
-    ($type, $path, $url, $mtime, $size)
+    ($type, $path, $url, datetime($mtime), $size)
