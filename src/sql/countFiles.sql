@@ -5,4 +5,4 @@ SELECT count(*)
 
 FROM sync
 
-WHERE "type" = 'src'
+WHERE type = 'src'

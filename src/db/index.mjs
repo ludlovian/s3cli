@@ -3,21 +3,33 @@ import { resolve } from 'path'
 
 import SQLite from 'better-sqlite3'
 
-import { ddl, sql } from './sql.mjs'
+import SQL from '../lib/sql.mjs'
+import * as sql from './sql.mjs'
 
-const DB_DIR = process.env.DB_DIR || resolve(homedir(), '.databases')
-const DB_FILE = process.env.DB_FILE || 'files2.sqlite'
+const DBVERSION = 3
 
-const db = new SQLite(resolve(DB_DIR, DB_FILE))
-db.pragma('journal_mode=WAL')
-db.exec(ddl)
+let opened
+export function open () {
+  if (opened) return
+  opened = true
+  const dbFile =
+    process.env.DB || resolve(homedir(), '.databases', 'files2.sqlite')
+  const db = new SQLite(dbFile)
+  SQL.attach(db)
+  sql.ddl()
+  const version = db
+    .prepare('select version from dbversion')
+    .pluck()
+    .get()
+  if (version !== DBVERSION) {
+    throw new Error('Wrong version of database: ' + dbFile)
+  }
+}
 
-for (const k in sql) sql[k] = db.prepare(sql[k])
-
-export const insertSyncFiles = db.transaction((type, files) => {
+export const insertSyncFiles = SQL.transaction((type, files) => {
   for (const { path, url, mtime: _mtime, size } of files) {
     const mtime = _mtime.toISOString()
-    sql.insertSync.run({ type, path, url, mtime, size })
+    sql.insertSync({ type, path, url, mtime, size })
   }
 })
 
@@ -42,7 +54,7 @@ export function countFiles () {
 }
 
 export function clearSync () {
-  return sql.clearSync.run()
+  return sql.clearSync()
 }
 
 export function selectHash ({ url, mtime: _mtime, size }) {
@@ -52,9 +64,9 @@ export function selectHash ({ url, mtime: _mtime, size }) {
 
 export function insertHash ({ url, mtime: _mtime, size, hash }) {
   const mtime = _mtime.toISOString()
-  sql.insertHash.run({ url, mtime, size, hash })
+  sql.insertHash({ url, mtime, size, hash })
 }
 
 export function deleteHash ({ url }) {
-  sql.deleteHash.run({ url })
+  sql.deleteHash({ url })
 }

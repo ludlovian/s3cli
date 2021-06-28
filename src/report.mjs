@@ -54,7 +54,7 @@ reporter
     )
   })
   .on('cp.dryrun', ({ url }) => log(`${url} - copied (dry run)`))
-  .on('sync.scan.start', () => log.status(`Scanning ... `))
+  .on('sync.scan.start', () => log.status('Scanning ... '))
   .on('sync.scan', ({ count }) => log.status(`Scanning ... ${count}`))
   .on('sync.scan.done', () => log.status(''))
   .on('sync.start', () => log.status('Scanning files'))

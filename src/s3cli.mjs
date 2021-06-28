@@ -1,5 +1,6 @@
 import sade from 'sade'
 
+import { open as dbopen } from './db/index.mjs'
 import ls from './ls.mjs'
 import cp from './cp.mjs'
 import sync from './sync.mjs'
@@ -43,6 +44,7 @@ const parsed = prog.parse(process.argv, {
 })
 
 if (parsed) {
+  dbopen()
   const { args, handler } = parsed
   handler(...args).catch(err => {
     console.error(err)

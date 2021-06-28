@@ -3,10 +3,10 @@
 --
 
 INSERT INTO hash
-    (url, mtime, "size", hash)
+    (url, mtime, size, hash)
 VALUES
     ($url, datetime($mtime), $size, $hash)
 ON CONFLICT DO UPDATE
   SET mtime  = excluded.mtime,
-      "size" = excluded."size",
+      size   = excluded.size,
       hash   = excluded.hash
