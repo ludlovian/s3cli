@@ -63,5 +63,3 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
     await lister.done
   }
 }
-
-

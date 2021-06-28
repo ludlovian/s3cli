@@ -100,7 +100,7 @@ test('replace', () => {
   const mtime = 'dst3a'
   const hash = 'hash3'
   const url = 'dest/file3'
-  run('insertHash', { run: { url, mtime, size , hash } })
+  run('insertHash', { run: { url, mtime, size, hash } })
   run('updateCopiedSync', { run: { url } })
 
   res = run('selectChanged', { all: [] })
@@ -117,7 +117,7 @@ test('copy', () => {
   const mtime = 'dst4'
   const hash = 'hash4'
   const url = 'dest/file4'
-  run('insertHash', { run: { url, mtime, size , hash } })
+  run('insertHash', { run: { url, mtime, size, hash } })
   run('insertSync', { run: { type, path: 'file4', url, mtime, size } })
 
   res = run('selectMissingFiles', { all: [] })
@@ -128,7 +128,7 @@ test('delete', () => {
   let res = run('selectSurplusFiles', { pluck: true, all: [] })
   const exp = ['dest/file5']
   assert.equal(res, exp)
-  
+
   const [url] = res
   run('deleteHash', { run: { url } })
   runSQL('delete from sync where url=?', { run: [url] })

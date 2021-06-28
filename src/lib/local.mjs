@@ -32,28 +32,31 @@ export function list (baseurl) {
 
   async function scan (dir) {
     const entries = await readdir(dir, { withFileTypes: true })
-    const files = await Promise.all(
-      entries
-        .filter(x => x.isFile())
-        .map(async ({ name }) => {
-          const fullname = dir + name
-          const path = fullname.slice(basepath.length)
-          const url = 'file://' + fullname
-          const stats = await fsStat(fullname)
-          return {
-            url,
-            path,
-            size: stats.size,
-            mtime: new Date(Math.round(stats.mtimeMs)),
-            mode: stats.mode & 0o777
-          }
-        })
-    )
+    const files = []
+    const dirs = []
+    for (const entry of entries) {
+      const { name } = entry
+      if (entry.isDirectory()) {
+        dirs.push(dir + name + '/')
+        continue
+      }
+      if (!entry.isFile()) continue
+      const fullname = dir + name
+      const path = fullname.slice(basepath.length)
+      const url = 'file://' + fullname
+      const stats = await fsStat(fullname)
+      files.push({
+        url,
+        path,
+        size: stats.size,
+        mtime: new Date(Math.round(stats.mtimeMs)),
+        mode: stats.mode & 0o777
+      })
+    }
     if (files.length) lister.emit('files', files)
-    const dirs = entries
-      .filter(x => x.isDirectory())
-      .map(x => dir + x.name + '/')
-    await Promise.all(dirs.map(scan))
+    for (const dir of dirs) {
+      await scan(dir)
+    }
   }
 }
 
