@@ -365,28 +365,31 @@ function list$1 (baseurl) {
 
   async function scan (dir) {
     const entries = await readdir(dir, { withFileTypes: true });
-    const files = await Promise.all(
-      entries
-        .filter(x => x.isFile())
-        .map(async ({ name }) => {
-          const fullname = dir + name;
-          const path = fullname.slice(basepath.length);
-          const url = 'file://' + fullname;
-          const stats = await stat$1(fullname);
-          return {
-            url,
-            path,
-            size: stats.size,
-            mtime: new Date(Math.round(stats.mtimeMs)),
-            mode: stats.mode & 0o777
-          }
-        })
-    );
+    const files = [];
+    const dirs = [];
+    for (const entry of entries) {
+      const { name } = entry;
+      if (entry.isDirectory()) {
+        dirs.push(dir + name + '/');
+        continue
+      }
+      if (!entry.isFile()) continue
+      const fullname = dir + name;
+      const path = fullname.slice(basepath.length);
+      const url = 'file://' + fullname;
+      const stats = await stat$1(fullname);
+      files.push({
+        url,
+        path,
+        size: stats.size,
+        mtime: new Date(Math.round(stats.mtimeMs)),
+        mode: stats.mode & 0o777
+      });
+    }
     if (files.length) lister.emit('files', files);
-    const dirs = entries
-      .filter(x => x.isDirectory())
-      .map(x => dir + x.name + '/');
-    await Promise.all(dirs.map(scan));
+    for (const dir of dirs) {
+      await scan(dir);
+    }
   }
 }
 
@@ -747,9 +750,7 @@ reporter
   })
   .on('cp.dryrun', ({ url }) => log(`${url} - copied (dry run)`))
   .on('sync.scan.start', () => log.status(`Scanning ... `))
-  .on('sync.scan', ({ count }) =>
-    log.status(`Scanning ... ${count}`)
-  )
+  .on('sync.scan', ({ count }) => log.status(`Scanning ... ${count}`))
   .on('sync.scan.done', () => log.status(''))
   .on('sync.start', () => log.status('Scanning files'))
   .on('sync.hash', url => log.status(`${url} - hashing`))
@@ -952,7 +953,7 @@ async function sync (srcRoot, dstRoot, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.0.6';
+const version = '2.0.7';
 
 prog.version(version);
 
