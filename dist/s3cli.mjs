@@ -1056,7 +1056,7 @@ async function rm (file, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.0.9';
+const version = '2.1.0';
 
 prog.version(version);
 
