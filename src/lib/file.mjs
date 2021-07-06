@@ -18,7 +18,7 @@ export default class File {
     if (typeof url !== 'string') throw new Error('Not a string')
     if (url.startsWith('s3://')) {
       let { bucket, path } = s3parse(url)
-      path = maybeAddSlash(path, directory)
+      if (path) path = maybeAddSlash(path, directory)
       return new File({ type: 's3', bucket, path })
     } else if (url.startsWith('file://')) {
       let path = url.slice(7)
