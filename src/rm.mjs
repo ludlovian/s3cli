@@ -1,11 +1,13 @@
-import { remove } from './vfs.mjs'
-import { validateUrl } from './util.mjs'
-import report from './report.mjs'
+import File from './lib/file.mjs'
+import s3remove from './s3/remove.mjs'
+import localRemove from './local/remove.mjs'
 
-export default async function rm (url, opts = {}) {
-  url = validateUrl(url)
-  const { dryRun } = opts
-  if (dryRun) return report('rm.dryrun', url)
-  report('rm', url)
-  await remove(url)
+export default async function rm (file, opts = {}) {
+  file = File.fromUrl(file, { resolve: true })
+  await file.stat()
+  if (file.isS3) {
+    await s3remove(file, opts)
+  } else {
+    await localRemove(file, opts)
+  }
 }

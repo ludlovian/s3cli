@@ -1,17 +1,16 @@
 #!/usr/bin/env node
 import sade from 'sade';
 import { homedir } from 'os';
-import { resolve, extname, dirname } from 'path';
+import { resolve, join, dirname } from 'path';
 import SQLite from 'better-sqlite3';
-import { pipeline } from 'stream/promises';
-import EventEmitter, { EventEmitter as EventEmitter$1 } from 'events';
-import { PassThrough } from 'stream';
-import AWS from 'aws-sdk';
-import { realpath, readdir, stat as stat$1, mkdir, chmod, utimes, unlink } from 'fs/promises';
-import { createReadStream as createReadStream$2, createWriteStream as createWriteStream$2 } from 'fs';
+import { format } from 'util';
+import { createReadStream, realpathSync, createWriteStream } from 'fs';
 import mime from 'mime';
+import { readdir, lstat, mkdir, utimes, rename as rename$2, rmdir, unlink } from 'fs/promises';
 import { createHash } from 'crypto';
-import { format as format$1 } from 'util';
+import AWS from 'aws-sdk';
+import { PassThrough } from 'stream';
+import { pipeline } from 'stream/promises';
 
 let db;
 
@@ -23,6 +22,7 @@ const SQL = {
 
 function statement (data) {
   function exec (...args) {
+    args = args.map(cleanArgs);
     if (!data.sqlList) data.sqlList = data.sql.split(';');
     if (!data.prepared) data.prepared = [];
     const { prepared, sqlList, pluck, raw, get, all } = data;
@@ -46,6 +46,15 @@ function statement (data) {
     get: { get: () => statement({ ...data, get: true }) },
     all: { get: () => statement({ ...data, all: true }) }
   })
+}
+
+function cleanArgs (x) {
+  if (!x || typeof x !== 'object') return x
+  x = { ...x };
+  for (const k in x) {
+    if (x[k] instanceof Date) x[k] = x[k].toISOString();
+  }
+  return x
 }
 
 function transaction (_fn) {
@@ -74,26 +83,31 @@ function tidy (statements) {
     .join(';')
 }
 
-const clearSync$1=SQL.from("DELETE FROM sync");
-const countFiles$1=SQL.from("SELECT count(*)  FROM sync  WHERE type = 'src'");
-const ddl=SQL.from("CREATE VIEW IF NOT EXISTS dbVersion AS SELECT 3 AS version;CREATE TABLE IF NOT EXISTS hash ( url TEXT NOT NULL PRIMARY KEY, mtime TEXT NOT NULL, size INTEGER NOT NULL, hash TEXT );CREATE TEMP TABLE sync ( type TEXT NOT NULL, path TEXT NOT NULL, url TEXT NOT NULL UNIQUE, mtime TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (type, path) );CREATE TEMP VIEW missingHashes AS SELECT a.url AS url  FROM sync a LEFT JOIN hash b ON b.url = a.url AND b.mtime = a.mtime AND b.size = a.size  WHERE b.hash IS NULL  ORDER BY a.url;CREATE TEMP VIEW missingFiles AS SELECT src.url AS url, src.path AS path  FROM sync src  LEFT JOIN sync dst ON src.path = dst.path AND dst.type = 'dst'  WHERE src.type = 'src' AND dst.path IS NULL  ORDER BY src.url;CREATE TEMP VIEW changedFiles AS SELECT src.url AS src, dst.url AS dst  FROM sync src  JOIN hash srcHash ON srcHash.url = src.url AND srcHash.size = src.size AND srcHash.mtime = src.mtime  JOIN sync dst ON dst.path = src.path AND dst.type = 'dst'  JOIN hash dstHash ON dstHash.url = dst.url AND dstHash.size = dst.size AND dstHash.mtime = dst.mtime  WHERE src.type = 'src' AND srcHash.hash != dstHash.hash  ORDER BY src.url;CREATE TEMP VIEW surplusFiles AS SELECT dst.url AS url  FROM sync dst  LEFT JOIN sync src ON src.path = dst.path AND src.type = 'src'  WHERE dst.type = 'dst' AND src.path IS NULL  ORDER BY dst.url");
-const deleteHash$1=SQL.from("DELETE FROM hash  WHERE url = $url");
-const insertHash$1=SQL.from("INSERT INTO hash (url, mtime, size, hash) VALUES ($url, datetime($mtime), $size, $hash) ON CONFLICT DO UPDATE SET mtime = excluded.mtime, size = excluded.size, hash = excluded.hash");
-const insertSync=SQL.from("INSERT INTO sync (type, path, url, mtime, size) VALUES ($type, $path, $url, datetime($mtime), $size)");
-const selectChanged$1=SQL.from("SELECT src AS \"from\", dst AS \"to\" from changedFiles");
-const selectHash$1=SQL.from("SELECT hash  FROM hash  WHERE url = $url AND mtime = datetime($mtime) AND size = $size");
-const selectMissingFiles$1=SQL.from("SELECT url, path FROM missingFiles");
-const selectMissingHashes$1=SQL.from("SELECT url FROM missingHashes");
-const selectSurplusFiles$1=SQL.from("SELECT url FROM surplusFiles");
+const cleanup=SQL.from("DELETE FROM s3_file WHERE updated IS NULL;DELETE FROM local_file WHERE updated IS NULL;DELETE FROM content WHERE contentId NOT IN ( SELECT contentId FROM s3_file UNION SELECT contentId FROM local_file )");
+const clearFilesBeforeScan=SQL.from("UPDATE s3_file SET updated = NULL WHERE $url LIKE 's3://%' AND 's3://' || bucket || '/' || path LIKE $url || '%';UPDATE local_file SET updated = NULL WHERE $url LIKE 'file://%' AND 'file://' || path LIKE $url || '%'");
+const ddl=SQL.from("PRAGMA journal_mode = WAL;PRAGMA foreign_keys = ON;CREATE VIEW IF NOT EXISTS dbVersion AS SELECT 4 AS version;CREATE TABLE IF NOT EXISTS content( contentId INTEGER PRIMARY KEY NOT NULL, md5Hash TEXT NOT NULL, size INTEGER NOT NULL, contentType TEXT, updated TEXT DEFAULT (datetime('now')), UNIQUE (md5Hash, size) );CREATE TABLE IF NOT EXISTS s3_file( bucket TEXT NOT NULL, path TEXT NOT NULL, contentId INTEGER NOT NULL REFERENCES content(contentId), mtime TEXT NOT NULL, storage TEXT NOT NULL, updated TEXT DEFAULT (datetime('now')), PRIMARY KEY (bucket, path) );CREATE TABLE IF NOT EXISTS local_file( path TEXT NOT NULL PRIMARY KEY, contentId INTEGER NOT NULL REFERENCES content(contentId), mtime TEXT NOT NULL, updated TEXT DEFAULT (datetime('now')) );CREATE VIEW IF NOT EXISTS s3_file_view AS SELECT f.bucket AS bucket, f.path AS path, c.size AS size, f.mtime AS mtime, f.storage AS storage, c.contentType AS contentType, c.md5Hash AS md5Hash FROM s3_file f JOIN content c USING (contentId) ORDER BY f.bucket, f.path;CREATE VIEW IF NOT EXISTS local_file_view AS SELECT f.path AS path, c.size AS size, f.mtime AS mtime, c.contentType AS contentType, c.md5Hash AS md5Hash FROM local_file f JOIN content c USING (contentId) ORDER BY f.path");
+const findDifferentPaths=SQL.from("WITH loc_path AS ( SELECT path, substr(path, length($localRoot) - 6) AS rel_path FROM local_file ),  rem_path AS ( SELECT bucket, path, substr(path, length($s3Root) - length(bucket) - 5) AS rel_path FROM s3_file )  SELECT lp.rel_path AS localPath, l.mtime AS localMtime, rp.rel_path AS remotePath, r.mtime AS remoteMtime, r.storage AS storage, c.size AS size, c.contentType AS contentType, c.md5Hash AS md5Hash  FROM local_file l JOIN s3_file r USING (contentId) JOIN content c USING (contentId)  JOIN loc_path lp ON lp.path = l.path  JOIN rem_path rp ON rp.bucket = r.bucket AND rp.path = r.path  WHERE 'file://' || l.path LIKE $localRoot || '%' AND 's3://' || r.bucket || '/' || r.path LIKE $s3Root || '%' AND lp.rel_path != rp.rel_path  ORDER BY lp.rel_path");
+const findDuplicates=SQL.from("WITH dups AS ( SELECT contentId FROM local_file GROUP BY contentId HAVING count(contentId) > 1 UNION SELECT contentId FROM s3_file GROUP BY contentId HAVING count(contentId) > 1 ) SELECT contentId AS contentId, 's3://' || bucket || '/' || path AS url FROM s3_file WHERE contentId IN (SELECT contentId FROM dups)  UNION ALL  SELECT contentId AS contentId, 'file://' || path AS url FROM local_file WHERE contentId IN (SELECT contentId FROM dups) ORDER BY contentId");
+const findLocalNotRemote=SQL.from("WITH remoteContent AS ( SELECT contentId FROM s3_file WHERE 's3://' || bucket || '/' || path LIKE $s3Root || '%' )  SELECT f.path AS path, f.mtime AS mtime, c.size AS size, c.contentType AS contentType, c.md5Hash AS md5Hash  FROM local_file f JOIN content c USING (contentId) WHERE f.contentId NOT IN ( SELECT contentId FROM remoteContent ) AND 'file://' || f.path LIKE $localRoot || '%'  ORDER BY f.path");
+const findRemoteNotLocal=SQL.from("WITH localContent AS ( SELECT contentId FROM local_file WHERE 'file://' || path LIKE $localRoot || '%' )  SELECT f.bucket AS bucket, f.path AS path, f.mtime AS mtime, c.size AS size, c.contentType AS contentType, c.md5Hash AS md5Hash, f.storage AS storage  FROM s3_file f JOIN content c USING (contentId)  WHERE f.contentId NOT IN ( SELECT contentId FROM localContent ) AND 's3://' || f.bucket || '/' || f.path LIKE $s3Root || '%'  ORDER BY f.bucket, f.path");
+const insertLocalFile=SQL.from("INSERT INTO content (md5Hash, size, contentType) VALUES ($md5Hash, $size, $contentType)  ON CONFLICT DO UPDATE SET contentType = excluded.contentType, updated = excluded.updated;INSERT INTO local_file (path, contentId, mtime) SELECT $path, contentId, datetime($mtime) FROM content WHERE md5Hash = $md5Hash AND size = $size  ON CONFLICT DO UPDATE SET contentId = excluded.contentId, mtime = excluded.mtime, updated = excluded.updated");
+const insertS3File=SQL.from("INSERT INTO content (md5Hash, size, contentType) VALUES ($md5Hash, $size, $contentType)  ON CONFLICT DO UPDATE SET contentType = excluded.contentType, updated = excluded.updated;INSERT INTO s3_file (bucket, path, contentId, mtime, storage) SELECT $bucket, $path, contentId, datetime($mtime), $storage FROM content WHERE md5Hash = $md5Hash AND size = $size  ON CONFLICT DO UPDATE SET contentId = excluded.contentId, mtime = excluded.mtime, storage = excluded.storage, updated = excluded.updated");
+const listLocalFiles=SQL.from("SELECT path AS path, size AS size, mtime AS mtime, contentType AS contentType, NULL AS storage, md5Hash AS md5Hash  FROM local_file_view  WHERE path LIKE $path || '%'  ORDER BY path");
+const listS3files=SQL.from("SELECT bucket AS bucket, path AS path, size AS size, mtime AS mtime, contentType AS contentType, storage AS storage, md5Hash AS md5Hash  FROM s3_file_view  WHERE bucket = $bucket AND path LIKE $path || '%'  ORDER BY bucket, path");
+const moveLocalFile=SQL.from("UPDATE local_file SET path = $newPath WHERE path = $oldPath");
+const moveS3file=SQL.from("UPDATE s3_file  SET path = $newPath  WHERE bucket = $bucket AND path = $oldPath");
+const removeLocalFile=SQL.from("DELETE FROM local_file WHERE path = $path");
+const removeS3file=SQL.from("DELETE FROM s3_file WHERE bucket = $bucket AND path = $path");
+const selectLocalHash=SQL.from("SELECT c.md5Hash  FROM content c JOIN local_file f USING (contentId)  WHERE f.path = $path AND c.size = $size AND f.mtime = datetime($mtime)");
 
-const DBVERSION = 3;
+const DBVERSION = 4;
 
 let opened;
 function open () {
   if (opened) return
   opened = true;
   const dbFile =
-    process.env.DB || resolve(homedir(), '.databases', 'files2.sqlite');
+    process.env.DB || resolve(homedir(), '.databases', 'files4.sqlite');
   const db = new SQLite(dbFile);
   SQL.attach(db);
   ddl();
@@ -106,541 +120,13 @@ function open () {
   }
 }
 
-const insertSyncFiles = SQL.transaction((type, files) => {
-  for (const { path, url, mtime: _mtime, size } of files) {
-    const mtime = _mtime.toISOString();
-    insertSync({ type, path, url, mtime, size });
-  }
-});
+const insertS3Files = SQL.transaction(files =>
+  files.forEach(file => insertS3File(file))
+);
 
-function selectMissingFiles () {
-  return selectMissingFiles$1.all()
-}
-
-function selectMissingHashes () {
-  return selectMissingHashes$1.pluck().all()
-}
-
-function selectChanged () {
-  return selectChanged$1.all()
-}
-
-function selectSurplusFiles () {
-  return selectSurplusFiles$1.pluck().all()
-}
-
-function countFiles () {
-  return countFiles$1.pluck().get()
-}
-
-function clearSync () {
-  return clearSync$1()
-}
-
-function selectHash ({ url, mtime: _mtime, size }) {
-  const mtime = _mtime.toISOString();
-  return selectHash$1.pluck().get({ url, mtime, size })
-}
-
-function insertHash ({ url, mtime: _mtime, size, hash }) {
-  const mtime = _mtime.toISOString();
-  insertHash$1({ url, mtime, size, hash });
-}
-
-function deleteHash ({ url }) {
-  deleteHash$1({ url });
-}
-
-// import assert from 'assert/strict'
-function throttle (options) {
-  if (typeof options !== 'object') options = { rate: options };
-  const { chunkTime = 100, windowSize = 30 } = options;
-  const rate = getRate(options.rate);
-  return async function * throttle (source) {
-    let window = [[0, Date.now()]];
-    let bytes = 0;
-    let chunkBytes = 0;
-    const chunkSize = Math.max(1, Math.ceil((rate * chunkTime) / 1e3));
-    for await (let data of source) {
-      while (data.length) {
-        const chunk = data.slice(0, chunkSize - chunkBytes);
-        data = data.slice(chunk.length);
-        chunkBytes += chunk.length;
-        if (chunkBytes < chunkSize) {
-          // assert.equal(data.length, 0)
-          yield chunk;
-          continue
-        }
-        bytes += chunkSize;
-        // assert.equal(chunkBytes, chunkSize)
-        chunkBytes = 0;
-        const now = Date.now();
-        const first = window[0];
-        const eta = first[1] + (1e3 * (bytes - first[0])) / rate;
-        window = [...window, [bytes, Math.max(now, eta)]].slice(-windowSize);
-        if (now < eta) {
-          await delay(eta - now);
-        }
-        yield chunk;
-      }
-    }
-  }
-}
-
-function getRate (val) {
-  const n = (val + '').toLowerCase();
-  if (!/^\d+[mk]?$/.test(n)) throw new Error(`Invalid rate: ${val}`)
-  const m = n.endsWith('m') ? 1024 * 1024 : n.endsWith('k') ? 1024 : 1;
-  return parseInt(n) * m
-}
-
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-function progressStream ({
-  onProgress,
-  interval = 1000,
-  ...rest
-} = {}) {
-  return async function * transform (source) {
-    const int = setInterval(report, interval);
-    let bytes = 0;
-    let done = false;
-    try {
-      for await (const chunk of source) {
-        bytes += chunk.length;
-        yield chunk;
-      }
-      done = true;
-      report();
-    } finally {
-      clearInterval(int);
-    }
-
-    function report () {
-      onProgress && onProgress({ bytes, done, ...rest });
-    }
-  }
-}
-
-function speedo ({
-  total,
-  interval = 250,
-  windowSize = 40
-} = {}) {
-  let readings;
-  let start;
-  return Object.assign(transform, { current: 0, total, update, done: false })
-
-  async function * transform (source) {
-    start = Date.now();
-    readings = [[start, 0]];
-    const int = setInterval(update, interval);
-    try {
-      for await (const chunk of source) {
-        transform.current += chunk.length;
-        yield chunk;
-      }
-      transform.total = transform.current;
-      update(true);
-    } finally {
-      clearInterval(int);
-    }
-  }
-
-  function update (done = false) {
-    if (transform.done) return
-    const { current, total } = transform;
-    const now = Date.now();
-    const taken = now - start;
-    readings = [...readings, [now, current]].slice(-windowSize);
-    const first = readings[0];
-    const wl = current - first[1];
-    const wt = now - first[0];
-    const rate = 1e3 * (done ? total / taken : wl / wt);
-    const percent = Math.round((100 * current) / total);
-    const eta = done || !total ? 0 : (1e3 * (total - current)) / rate;
-    Object.assign(transform, { done, taken, rate, percent, eta });
-  }
-}
-
-function once (fn) {
-  function f (...args) {
-    if (f.called) return f.value
-    f.value = fn(...args);
-    f.called = true;
-    return f.value
-  }
-
-  if (fn.name) {
-    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
-  }
-
-  return f
-}
-
-const getS3 = once(async () => {
-  const REGION = 'eu-west-1';
-  return new AWS.S3({ region: REGION })
-});
-
-function parseAddress (url) {
-  const m = /^s3:\/\/([^/]+)(?:\/(.*))?$/.exec(url);
-  if (!m) throw new TypeError(`Bad S3 URL: ${url}`)
-  return { Bucket: m[1], Key: m[2] || '' }
-}
-
-function list$2 (baseurl) {
-  if (!baseurl.endsWith('/')) baseurl = baseurl + '/';
-  const { Bucket, Key: Prefix } = parseAddress(baseurl);
-  const lister = new EventEmitter();
-  lister.done = (async () => {
-    const s3 = await getS3();
-    const request = { Bucket, Prefix };
-    while (true) {
-      const result = await s3.listObjectsV2(request).promise();
-      const files = result.Contents.map(item => {
-        const file = {};
-        file.url = `s3://${Bucket}/${item.Key}`;
-        file.path = file.url.slice(baseurl.length);
-        file.size = item.Size;
-        file.mtime = item.LastModified;
-        if (!item.ETag.includes('-')) file.md5 = item.ETag.replaceAll('"', '');
-        file.storage = item.StorageClass;
-        return file
-      });
-      if (files.length) lister.emit('files', files);
-      /* c8 ignore next 3 */
-      if (!result.IsTruncated) break
-      request.ContinuationToken = result.NextContinuationToken;
-    }
-    lister.emit('done');
-  })();
-  return lister
-}
-
-async function stat (url) {
-  const { Bucket, Key } = parseAddress(url);
-  const s3 = await getS3();
-
-  const request = { Bucket, Key };
-  const res = await s3.headObject(request).promise();
-  const attrs = unpackMetadata(res.Metadata);
-  return {
-    contentType: res.ContentType,
-    mtime: res.LastModified,
-    size: res.ContentLength,
-    md5: !res.ETag.includes('-') ? res.ETag.replaceAll('"', '') : attrs.md5,
-    storage: res.StorageClass,
-    attrs
-  }
-}
-
-async function getHash$2 (url) {
-  const { mtime, size, attrs } = await stat(url);
-  const hash = attrs && attrs.md5 ? attrs.md5 : null;
-  insertHash({ url, mtime, size, hash });
-  return hash
-}
-
-async function createReadStream$1 (url) {
-  const { Bucket, Key } = parseAddress(url);
-  const s3 = await getS3();
-  const { mtime, size, contentType, hash, attrs } = await stat(url);
-  const source = { mtime, size, contentType, hash, attrs };
-
-  const stream = s3.getObject({ Bucket, Key }).createReadStream();
-  stream.source = source;
-  return stream
-}
-
-async function createWriteStream$1 (url, source) {
-  const { size, contentType, hash, attrs } = source;
-  const { Bucket, Key } = parseAddress(url);
-  const s3 = await getS3();
-  const passthru = new PassThrough();
-  if (!hash) throw new Error('No hash supplied')
-  if (!size) throw new Error('No size supplied')
-  if (!contentType) throw new Error('No contentType supplied')
-
-  const request = {
-    Body: passthru,
-    Bucket,
-    Key,
-    ContentLength: size,
-    ContentType: contentType,
-    ContentMD5: Buffer.from(hash, 'hex').toString('base64'),
-    Metadata: packMetadata(attrs)
-  };
-
-  passthru.done = s3
-    .putObject(request)
-    .promise()
-    .then(() => getHash$2(url));
-  return passthru
-}
-
-async function remove$2 (url) {
-  const { Bucket, Key } = parseAddress(url);
-  const s3 = await getS3();
-  await s3.deleteObject({ Bucket, Key }).promise();
-}
-
-function unpackMetadata (md, key = 's3cmd-attrs') {
-  const numbers = new Set(['mode', 'size', 'gid', 'uid']);
-  const dates = new Set(['atime', 'mtime', 'ctime']);
-  if (!md || typeof md !== 'object' || !md[key]) return {}
-  return Object.fromEntries(
-    md[key]
-      .split('/')
-      .map(x => x.split(':'))
-      .map(([k, v]) => {
-        if (dates.has(k)) {
-          v = new Date(Number(v));
-        } else if (numbers.has(k)) {
-          v = Number(v);
-        }
-        return [k, v]
-      })
-  )
-}
-
-function packMetadata (obj, key = 's3cmd-attrs') {
-  return {
-    [key]: Object.keys(obj)
-      .sort()
-      .map(k => [k, obj[k]])
-      .filter(([k, v]) => v != null)
-      .map(([k, v]) => `${k}:${v instanceof Date ? +v : v}`)
-      .join('/')
-  }
-}
-
-async function hashFile (filename, { algo = 'md5', enc = 'hex' } = {}) {
-  const hasher = createHash(algo);
-  for await (const chunk of createReadStream$2(filename)) {
-    hasher.update(chunk);
-  }
-  return hasher.digest(enc)
-}
-
-function list$1 (baseurl) {
-  const lister = new EventEmitter$1();
-  let basepath = baseurl.slice(7);
-  lister.done = (async () => {
-    basepath = await realpath(basepath);
-    if (!basepath.endsWith('/')) basepath += '/';
-    await scan(basepath);
-  })();
-  return lister
-
-  async function scan (dir) {
-    const entries = await readdir(dir, { withFileTypes: true });
-    const files = [];
-    const dirs = [];
-    for (const entry of entries) {
-      const { name } = entry;
-      if (entry.isDirectory()) {
-        dirs.push(dir + name + '/');
-        continue
-      }
-      if (!entry.isFile()) continue
-      const fullname = dir + name;
-      const path = fullname.slice(basepath.length);
-      const url = 'file://' + fullname;
-      const stats = await stat$1(fullname);
-      files.push({
-        url,
-        path,
-        size: stats.size,
-        mtime: new Date(Math.round(stats.mtimeMs)),
-        mode: stats.mode & 0o777
-      });
-    }
-    if (files.length) lister.emit('files', files);
-    for (const dir of dirs) {
-      await scan(dir);
-    }
-  }
-}
-
-async function getHash$1 (url, stats) {
-  const path = url.slice(7);
-  if (!stats) stats = await stat$1(path);
-  const { mtime, size } = stats;
-  let hash = selectHash({ url, mtime, size });
-  if (hash) return hash
-  hash = await hashFile(path);
-  insertHash({ url, mtime, size, hash });
-  return hash
-}
-
-async function createReadStream (url) {
-  const path = url.slice(7);
-  const stats = await stat$1(path);
-  const hash = await getHash$1(url, stats);
-  const attrs = {
-    atime: stats.atime,
-    ctime: stats.ctime,
-    mtime: stats.mtime,
-    uid: 1000,
-    gid: 1000,
-    uname: 'alan',
-    gname: 'alan',
-    mode: stats.mode & 0o777,
-    md5: hash
-  };
-  const source = {
-    size: stats.size,
-    mtime: stats.mtime,
-    contentType: mime.getType(extname(path)),
-    hash,
-    attrs
-  };
-
-  const stream = createReadStream$2(path);
-  stream.source = source;
-  return stream
-}
-
-async function createWriteStream (url, source) {
-  const path = url.slice(7);
-  await mkdir(dirname(path), { recursive: true });
-  const { attrs } = source;
-  const mtime = attrs && attrs.mtime;
-  const mode = attrs && attrs.mode;
-  const stream = createWriteStream$2(path);
-  const streamComplete = new Promise((resolve, reject) =>
-    stream.on('error', reject).on('finish', resolve)
-  );
-  stream.done = streamComplete.then(async () => {
-    if (mode) await chmod(path, mode);
-    if (mtime) await utimes(path, mtime, mtime);
-    return await getHash$1(url)
-  });
-  return stream
-}
-
-async function remove$1 (url) {
-  const path = url.slice(7);
-  await unlink(path);
-}
-
-function list (url) {
-  if (isS3(url)) return list$2(url)
-  else if (isLocal(url)) return list$1(url)
-  /* c8 ignore next */ else throw new Error('Huh? ' + url)
-}
-
-async function copy (srcUrl, dstUrl, opts = {}) {
-  const { onProgress, limit } = opts;
-  const sourceStream = isS3(srcUrl)
-    ? await createReadStream$1(srcUrl)
-    : await createReadStream(srcUrl);
-
-  const { source } = sourceStream;
-
-  const destStream = isS3(dstUrl)
-    ? await createWriteStream$1(dstUrl, source)
-    : await createWriteStream(dstUrl, source);
-
-  const speedo$1 = speedo({ total: source.size });
-
-  const pPipeline = pipeline(
-    [
-      sourceStream,
-      limit && throttle(limit),
-      onProgress && speedo$1,
-      onProgress && progressStream({ onProgress, speedo: speedo$1 }),
-      destStream
-    ].filter(Boolean)
-  );
-
-  await Promise.all([pPipeline, destStream.done]);
-}
-
-function getHash (url) {
-  /* c8 ignore next */
-  if (isS3(url)) return getHash$2(url)
-  else if (isLocal(url)) return getHash$1(url)
-  /* c8 ignore next */ else throw new Error('Huh? ' + url)
-}
-
-async function remove (url) {
-  if (isS3(url)) await remove$2(url);
-  else if (isLocal(url)) await remove$1(url);
-  /* c8 ignore next */ else throw new Error('Huh? ' + url)
-  deleteHash({ url });
-}
-
-function isS3 (url) {
-  return url.startsWith('s3://')
-}
-
-function isLocal (url) {
-  return url.startsWith('file:///')
-}
-
-var SEC = 1e3,
-	MIN = SEC * 60,
-	HOUR = MIN * 60,
-	DAY = HOUR * 24,
-	YEAR = DAY * 365.25;
-
-function fmt(val, pfx, str, long) {
-	var num = (val | 0) === val ? val : ~~(val + 0.5);
-	return pfx + num + (long ? (' ' + str + (num != 1 ? 's' : '')) : str[0]);
-}
-
-function format(num, long) {
-	var pfx = num < 0  ? '-' : '', abs = num < 0 ? -num : num;
-	if (abs < SEC) return num + (long ? ' ms' : 'ms');
-	if (abs < MIN) return fmt(abs / SEC, pfx, 'second', long);
-	if (abs < HOUR) return fmt(abs / MIN, pfx, 'minute', long);
-	if (abs < DAY) return fmt(abs / HOUR, pfx, 'hour', long);
-	if (abs < YEAR) return fmt(abs / DAY, pfx, 'day', long);
-	return fmt(abs / YEAR, pfx, 'year', long);
-}
-
-var RGX = /([^{]*?)\w(?=\})/g;
-
-var MAP = {
-	YYYY: 'getFullYear',
-	YY: 'getYear',
-	MM: function (d) {
-		return d.getMonth() + 1;
-	},
-	DD: 'getDate',
-	HH: 'getHours',
-	mm: 'getMinutes',
-	ss: 'getSeconds',
-	fff: 'getMilliseconds'
-};
-
-function tinydate (str, custom) {
-	var parts=[], offset=0;
-
-	str.replace(RGX, function (key, _, idx) {
-		// save preceding string
-		parts.push(str.substring(offset, idx - 1));
-		offset = idx += key.length + 1;
-		// save function
-		parts.push(custom && custom[key] || function (d) {
-			return ('00' + (typeof MAP[key] === 'string' ? d[MAP[key]]() : MAP[key](d))).slice(-key.length);
-		});
-	});
-
-	if (offset !== str.length) {
-		parts.push(str.substring(offset));
-	}
-
-	return function (arg) {
-		var out='', i=0, d=arg||new Date();
-		for (; i<parts.length; i++) {
-			out += (typeof parts[i]==='string') ? parts[i] : parts[i](d);
-		}
-		return out;
-	};
-}
+const insertLocalFiles = SQL.transaction(files =>
+  files.forEach(file => insertLocalFile(file))
+);
 
 const allColours = (
   '20,21,26,27,32,33,38,39,40,41,42,43,44,45,56,57,62,63,68,69,74,75,76,' +
@@ -723,7 +209,7 @@ function _log (
   { newline = true, limitWidth, prefix = '', level, colour }
 ) {
   if (level && (!state.level || state.level < level)) return
-  const msg = format$1(...args);
+  const msg = format(...args);
   let string = prefix + msg;
   if (colour != null) string = painter(colour)(string);
   if (limitWidth) string = truncate(string, state.width);
@@ -769,76 +255,80 @@ function makeLogger (base, changes = {}) {
 
 const log = makeLogger();
 
-const reporter = new EventEmitter();
-const { green, cyan } = log;
-
-function report (msg, payload) {
-  reporter.emit(msg, payload);
+async function * scan$1 (root) {
+  yield * scanDir(root.path);
 }
 
-/* c8 ignore start */
-reporter
-  .on('list.file', data => {
-    let s = '';
-    if (data.long) {
-      s += data.storage.padEnd(1) + '  ';
-      const size = data.human ? fmtSize(data.size) : data.size.toString();
-      s += size.padStart(10) + '  ';
-      s += fmtDate(data.mtime).padEnd(18) + '  ';
-    }
-    log(s + data.path);
-  })
-  .on('list.file.totals', ({ totalSize, totalCount, total, human }) => {
-    if (!total) return
-    const s = human ? `${fmtSize(totalSize)}B` : `${comma(totalSize)} bytes`;
-    log(`\n${s} in ${comma(totalCount)} file${totalCount > 1 ? 's' : ''}`);
-  })
-  .on('cp', opts => opts.quiet || log(opts.url))
-  .on('cp.start', url => log(cyan(url)))
-  .on('cp.update', data => {
-    const { bytes, percent, total, taken, eta, speed } = data;
-    log.status(
-      [
-        comma(bytes).padStart(1 + comma(total).length),
-        `${percent.toString().padStart(3)}%`,
-        `time ${fmtTime(taken)}`,
-        `eta ${fmtTime(eta)}`,
-        `rate ${fmtSize(speed)}B/s`
-      ].join(' ')
-    );
-  })
-  .on('cp.done', ({ bytes, taken, speed }) => {
-    log(
-      green(
-        [
-          ` ${comma(bytes)} bytes copied`,
-          `in ${fmtTime(taken)}`,
-          `at ${fmtSize((bytes * 1e3) / taken)}B/s`
-        ].join(' ')
-      )
-    );
-  })
-  .on('cp.dryrun', ({ url }) => log(`${url} - copied (dry run)`))
-  .on('sync.scan.start', () => log.status('Scanning ... '))
-  .on('sync.scan', ({ count }) => log.status(`Scanning ... ${count}`))
-  .on('sync.scan.done', () => log.status(''))
-  .on('sync.start', () => log.status('Scanning files'))
-  .on('sync.hash', url => log.status(`${url} - hashing`))
-  .on('sync.done', count =>
-    log(`${comma(count)} file${count > 1 ? 's' : ''} processed.`)
-  )
-  .on('rm.dryrun', url => log(`${url} - deleted (dry run)`))
-  .on('rm', url => log(`${url} - deleted`))
-  .on('retry', ({ delay, error }) => {
-    console.error(
-      `\nError occured: ${error.message}\nWaiting ${fmtTime(delay)} to retry...`
-    );
-  });
+async function * scanDir (dir) {
+  const File = (await Promise.resolve().then(function () { return file; })).default;
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files = [];
+  const dirs = [];
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) dirs.push(path);
+    if (!entry.isFile()) continue
+    const file = new File({ type: 'local', path });
+    await file.stat();
+    files.push(file);
+  }
+  if (files.length) yield files;
+  for (const dir of dirs) {
+    yield * scanDir(dir);
+  }
+}
 
-function fmtTime (ms) {
-  if (ms < 1000) ms = 1000 * Math.round(ms / 1000);
-  if (!ms) return '0s'
-  return format(ms)
+async function hashFile (filename, { algo = 'md5', enc = 'hex' } = {}) {
+  const hasher = createHash(algo);
+  for await (const chunk of createReadStream(filename)) {
+    hasher.update(chunk);
+  }
+  return hasher.digest(enc)
+}
+
+async function stat$1 (file) {
+  const stats = await lstat(file.path);
+  file.size = stats.size;
+  file.mtime = stats.mtime;
+  file.md5Hash = selectLocalHash.pluck().get(file);
+  if (!file.md5Hash) {
+    log.status('%s ... hashing', file.path);
+    file.md5Hash = await hashFile(file.path);
+    insertLocalFile(file);
+  }
+}
+
+function once (fn) {
+  function f (...args) {
+    if (f.called) return f.value
+    f.value = fn(...args);
+    f.called = true;
+    return f.value
+  }
+
+  if (fn.name) {
+    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
+  }
+
+  return f
+}
+
+function isUploading (src, dst) {
+  if (src.isLocal && dst.isS3) return true
+  if (src.isS3 && dst.isLocal) return false
+  throw new Error('Must either upload or download')
+}
+
+function comma (n) {
+  if (typeof n !== 'number') return n
+  return n.toLocaleString()
+}
+
+function fmtTime (t) {
+  t = Math.round(t / 1000);
+  if (t < 60) return t + 's'
+  t = Math.round(t / 60);
+  return t + 'm'
 }
 
 function fmtSize (n) {
@@ -850,175 +340,718 @@ function fmtSize (n) {
   ];
 
   for (const [suffix, factor] of suffixes) {
-    if (n >= factor) {
-      return (n / factor).toFixed(1) + suffix
-    }
+    if (n >= factor) return (n / factor).toFixed(1) + suffix
   }
   return '0'
 }
 
-function comma (n) {
-  if (typeof n !== 'number') return ''
-  return n.toLocaleString()
-}
-
-const fmtDate = tinydate('{DD}-{MMM}-{YY} {HH}:{mm}:{ss}', {
-  MMM: d => d.toLocaleString(undefined, { month: 'short' }).slice(0, 3)
+const getS3 = once(() => {
+  const REGION = 'eu-west-1';
+  return new AWS.S3({ region: REGION })
 });
-/* c8 ignore end */
 
-async function ls (url, options) {
-  let totalCount = 0;
-  let totalSize = 0;
-
-  const lister = list(url);
-  lister.on('files', files => {
-    files.forEach(file => {
-      totalCount++;
-      totalSize += file.size || 0;
-      file.storage = STORAGE_CLASS[file.storage] || 'F';
-      report('list.file', { ...options, ...file });
-    });
-  });
-  await lister.done;
-  report('list.file.totals', { ...options, totalSize, totalCount });
+function parse (url) {
+  const m = /^s3:\/\/([^/]+)(?:\/(.*))?$/.exec(url);
+  if (!m) throw new TypeError(`Bad S3 URL: ${url}`)
+  return { bucket: m[1], path: m[2] || '' }
 }
 
-const STORAGE_CLASS = {
+function onProgress ({ speedo }) {
+  const { done, current, percent, total, taken, eta, rate } = speedo;
+  if (!done) {
+    const s = [
+      comma(current).padStart(1 + comma(total).length),
+      `${percent.toString().padStart(3)}%`,
+      `time ${fmtTime(taken)}`,
+      `eta ${fmtTime(eta)}`,
+      `rate ${fmtSize(rate)}B/s`
+    ].join(' ');
+    log.status(s);
+  } else {
+    const s = [
+      ` ${comma(total)} bytes copied`,
+      `in ${fmtTime(taken)}`,
+      `at ${fmtSize(rate)}B/s`
+    ].join(' ');
+    log(log.green(s));
+  }
+}
+
+async function * scan (root) {
+  const File = (await Promise.resolve().then(function () { return file; })).default;
+  const s3 = getS3();
+  const request = { Bucket: root.bucket, Prefix: root.path };
+  while (true) {
+    const result = await s3.listObjectsV2(request).promise();
+    const files = [];
+    for (const item of result.Contents) {
+      const file = new File({
+        type: 's3',
+        bucket: root.bucket,
+        path: item.Key,
+        size: item.Size,
+        mtime: item.LastModified,
+        storage: item.StorageClass || 'STANDARD',
+        md5Hash: item.ETag
+      });
+      if (!file.hasStats) await file.stat();
+      files.push(file);
+    }
+    yield files;
+
+    if (!result.IsTruncated) break
+    request.ContinuationToken = result.NextContinuationToken;
+  }
+}
+
+const MD_KEY = 's3cmd-attrs';
+
+async function stat (file) {
+  const s3 = getS3();
+  const req = { Bucket: file.bucket, Key: file.path };
+  const item = await s3.headObject(req).promise();
+  file.mtime = item.LastModified;
+  file.size = item.ContentLength;
+  file.storage = item.StorageClass || 'STANDARD';
+  if (item.Metadata && item.Metadata[MD_KEY]) {
+    file.metadata = unpack(item.Metadata[MD_KEY]);
+  }
+  if (!item.ETag.includes('-')) {
+    file.md5Hash = item.ETag.replaceAll('"', '');
+  } else if (file.metadata && file.metadata.md5) {
+    file.md5Hash = file.metadata.md5;
+  } else {
+    throw new Error('Could not get md5 hash for ' + file.url)
+  }
+}
+
+function unpack (s) {
+  return Object.fromEntries(
+    s
+      .split('/')
+      .map(x => x.split(':'))
+      .map(([k, v]) => {
+        if (!isNaN(Number(v))) v = Number(v);
+        if (k.endsWith('time')) v = new Date(v);
+        return [k, v]
+      })
+  )
+}
+
+class File {
+  static fromUrl (url, opts = {}) {
+    const { directory, resolve } = opts;
+    if (typeof url !== 'string') throw new Error('Not a string')
+    if (url.startsWith('s3://')) {
+      let { bucket, path } = parse(url);
+      path = maybeAddSlash(path, directory);
+      return new File({ type: 's3', bucket, path })
+    } else if (url.startsWith('file://')) {
+      let path = url.slice(7);
+      if (resolve) path = realpathSync(path);
+      path = maybeAddSlash(path, directory);
+      return new File({ type: 'local', path })
+    } else if (url.includes('/')) {
+      return File.fromUrl('file://' + url, opts)
+    }
+    throw new Error('Cannot understand ' + url)
+  }
+
+  constructor (data) {
+    this.type = data.type;
+    if (this.type === 's3') {
+      this.bucket = data.bucket;
+      this.path = data.path;
+      this.storage = data.storage || 'STANDARD';
+      this.metadata = data.metadata;
+    } else if (this.type === 'local') {
+      this.path = data.path;
+    } else {
+      throw new Error('Unkown type:' + data.type)
+    }
+    this.size = data.size;
+    this.mtime = data.mtime;
+    this.contentType = data.contentType;
+    this.md5Hash = undefined;
+    if (data.md5Hash) {
+      if (!data.md5Hash.startsWith('"')) {
+        this.md5Hash = data.md5Hash;
+      } else if (!data.md5Hash.includes('-')) {
+        this.md5Hash = data.md5Hash.replaceAll('"', '');
+      }
+    }
+
+    if (typeof this.mtime === 'string') {
+      this.mtime = new Date(this.mtime + 'Z');
+    }
+    if (!this.contentType && !this.isDirectory) {
+      this.contentType = mime.getType(this.path.split('.').pop());
+    }
+  }
+
+  get isDirectory () {
+    return this.path.endsWith('/')
+  }
+
+  get isS3 () {
+    return this.type === 's3'
+  }
+
+  get isLocal () {
+    return this.type === 'local'
+  }
+
+  get hasStats () {
+    return !!this.md5Hash
+  }
+
+  get url () {
+    if (this.isS3) {
+      return `s3://${this.bucket}/${this.path}`
+    } else {
+      return `file://${this.path}`
+    }
+  }
+
+  async stat () {
+    if (this.hasStats) return
+    if (this.isS3) {
+      await stat(this);
+    } else {
+      await stat$1(this);
+    }
+  }
+
+  rebase (from, to) {
+    if (!this.url.startsWith(from.url)) {
+      throw new Error(`${this.url} does not start with ${from.url}`)
+    }
+    return new File({
+      ...this,
+      type: to.type,
+      bucket: to.bucket,
+      path: to.path + this.path.slice(from.path.length)
+    })
+  }
+
+  async scan () {
+    let n = 0;
+    log.status('Scanning %s ... ', this.url);
+    clearFilesBeforeScan({ url: this.url });
+    const scanner = this.isLocal ? scan$1 : scan;
+    const insert = this.isLocal ? insertLocalFiles : insertS3Files;
+    for await (const files of scanner(this)) {
+      n += files.length;
+      log.status('Scanning %s ... %d', this.url, n);
+      insert(files);
+    }
+    log('%s files found on %s', n.toLocaleString(), this.url);
+    cleanup();
+  }
+}
+
+function maybeAddSlash (str, addSlash) {
+  if (addSlash) {
+    if (str.endsWith('/')) return str
+    return str + '/'
+  } else {
+    if (!str.endsWith('/')) return str
+    return str.slice(0, -1)
+  }
+}
+
+var file = /*#__PURE__*/Object.freeze({
+  __proto__: null,
+  'default': File
+});
+
+async function ls (url, opts) {
+  const { long, rescan, human, total } = opts;
+  url = File.fromUrl(url, { resolve: true });
+
+  if (rescan) await url.scan();
+
+  let nTotalCount = 0;
+  let nTotalSize = 0;
+
+  const sql = url.isLocal ? listLocalFiles : listS3files;
+  for (const row of sql.all(url)) {
+    const { path, mtime, size, storage } = row;
+    nTotalCount++;
+    nTotalSize += size;
+    let s = '';
+    if (long) {
+      s = (STORAGE[storage] || 'F') + '  ';
+      const sz = human ? fmtSize(size) : size.toString();
+      s += sz.padStart(10) + '  ';
+      s += mtime + '  ';
+    }
+    s += path;
+    log(s);
+  }
+  if (total) {
+    const sz = human ? `${fmtSize(nTotalSize)}B` : `${comma(nTotalSize)} bytes`;
+    log(`\n${sz} in ${comma(nTotalCount)} file${nTotalCount > 1 ? 's' : ''}`);
+  }
+}
+
+const STORAGE = {
   STANDARD: 'S',
   STANDARD_IA: 'I',
   GLACIER: 'G',
   DEEP_ARCHIVE: 'D'
 };
 
-function retry (fn, opts = {}) {
-  return tryOne({ ...opts, fn, attempt: 1 })
+function speedo ({
+  total,
+  interval = 250,
+  windowSize = 40
+} = {}) {
+  let readings;
+  let start;
+  return Object.assign(transform, { current: 0, total, update, done: false })
+
+  async function * transform (source) {
+    start = Date.now();
+    readings = [[start, 0]];
+    const int = setInterval(update, interval);
+    try {
+      for await (const chunk of source) {
+        transform.current += chunk.length;
+        yield chunk;
+      }
+      transform.total = transform.current;
+      update(true);
+    } finally {
+      clearInterval(int);
+    }
+  }
+
+  function update (done = false) {
+    if (transform.done) return
+    const { current, total } = transform;
+    const now = Date.now();
+    const taken = now - start;
+    readings = [...readings, [now, current]].slice(-windowSize);
+    const first = readings[0];
+    const wl = current - first[1];
+    const wt = now - first[0];
+    const rate = 1e3 * (done ? total / taken : wl / wt);
+    const percent = Math.round((100 * current) / total);
+    const eta = done || !total ? 0 : (1e3 * (total - current)) / rate;
+    Object.assign(transform, { done, taken, rate, percent, eta });
+  }
 }
 
-function tryOne (options) {
-  const {
-    fn,
-    attempt,
-    retries = 10,
-    delay = 1000,
-    backoff = retry.exponential(1.5),
-    onRetry
-  } = options;
-  return new Promise(resolve => resolve(fn())).catch(error => {
-    if (attempt > retries) throw error
-    if (onRetry) onRetry({ error, attempt, delay });
-    return sleep(delay).then(() =>
-      tryOne({ ...options, attempt: attempt + 1, delay: backoff(delay) })
-    )
-  })
+// import assert from 'assert/strict'
+function throttle (options) {
+  if (typeof options !== 'object') options = { rate: options };
+  const { chunkTime = 100, windowSize = 30 } = options;
+  const rate = getRate(options.rate);
+  return async function * throttle (source) {
+    let window = [[0, Date.now()]];
+    let bytes = 0;
+    let chunkBytes = 0;
+    const chunkSize = Math.max(1, Math.ceil((rate * chunkTime) / 1e3));
+    for await (let data of source) {
+      while (data.length) {
+        const chunk = data.slice(0, chunkSize - chunkBytes);
+        data = data.slice(chunk.length);
+        chunkBytes += chunk.length;
+        if (chunkBytes < chunkSize) {
+          // assert.equal(data.length, 0)
+          yield chunk;
+          continue
+        }
+        bytes += chunkSize;
+        // assert.equal(chunkBytes, chunkSize)
+        chunkBytes = 0;
+        const now = Date.now();
+        const first = window[0];
+        const eta = first[1] + (1e3 * (bytes - first[0])) / rate;
+        window = [...window, [bytes, Math.max(now, eta)]].slice(-windowSize);
+        if (now < eta) {
+          await delay(eta - now);
+        }
+        yield chunk;
+      }
+    }
+  }
 }
 
-retry.exponential = x => n => Math.round(n * x);
+function getRate (val) {
+  const n = (val + '').toLowerCase();
+  if (!/^\d+[mk]?$/.test(n)) throw new Error(`Invalid rate: ${val}`)
+  const m = n.endsWith('m') ? 1024 * 1024 : n.endsWith('k') ? 1024 : 1;
+  return parseInt(n) * m
+}
 
-const sleep = delay => new Promise(resolve => setTimeout(resolve, delay));
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-const validProtocols = /^(?:s3|file):\/\//;
+function progressStream ({
+  onProgress,
+  interval = 1000,
+  ...rest
+} = {}) {
+  return async function * transform (source) {
+    const int = setInterval(report, interval);
+    let bytes = 0;
+    let done = false;
+    try {
+      for await (const chunk of source) {
+        bytes += chunk.length;
+        yield chunk;
+      }
+      done = true;
+      report();
+    } finally {
+      clearInterval(int);
+    }
 
-function validateUrl (url, { dir } = {}) {
-  if (url.startsWith('/')) url = 'file://' + url;
+    function report () {
+      onProgress && onProgress({ bytes, done, ...rest });
+    }
+  }
+}
+
+async function upload (source, dest, opts) {
+  const { path, size, contentType, md5Hash } = source;
+  const { dryRun, limit, progress, interval = 1000 } = opts;
+  if (dryRun) {
+    log.colour('cyan')('%s uploaded (dryrun)', dest.url);
+    return
+  }
+
+  if (progress) log(log.cyan(dest.url));
+
+  const speedo$1 = speedo({ total: size });
+  const body = new PassThrough();
+
+  const pPipeline = pipeline(
+    ...[
+      createReadStream(path),
+      limit && throttle(limit),
+      progress && speedo$1,
+      progress && progressStream({ onProgress, interval, speedo: speedo$1 }),
+      body
+    ].filter(Boolean)
+  );
+
+  const request = {
+    Body: body,
+    Bucket: dest.bucket,
+    Key: dest.path,
+    ContentLength: size,
+    ContentType: contentType,
+    ContentMD5: Buffer.from(md5Hash, 'hex').toString('base64'),
+    Metadata: makeMetadata(source)
+  };
+
+  // perform the upload
+  const s3 = getS3();
+  const pUpload = s3.putObject(request).promise();
+
+  // wait for everything to finish
+  await Promise.all([pPipeline, pUpload]);
+  const { ETag } = await pUpload;
+
+  // check the etag is the md5 of the source data
   /* c8 ignore next 3 */
-  if (!validProtocols.test(url)) {
-    throw new Error('Unknown type of URI: ' + url)
+  if (ETag !== `"${md5Hash}"`) {
+    throw new Error(`Upload of ${path} to ${dest} failed`)
   }
-  /* c8 ignore next */
-  if (dir && !url.endsWith('/')) url += '/';
-  return url
+
+  dest.md5Hash = undefined;
+  await dest.stat();
+  insertS3File(dest);
 }
 
-async function cp (fromUrl, toUrl, opts = {}) {
-  fromUrl = validateUrl(fromUrl);
-  toUrl = validateUrl(toUrl);
-
-  const { limit, progress, dryRun } = opts;
-  if (dryRun) return report('cp.dryrun', { url: toUrl })
-
-  const copyOpts = {
-    limit,
-    onProgress: progress ? doProgress(toUrl) : undefined
-  };
-  const retryOpts = {
-    retries: 5,
-    delay: 5000,
-    onRetry: data => report('retry', data)
-  };
-
-  await retry(() => copy(fromUrl, toUrl, copyOpts), retryOpts);
-  if (!progress) {
-    report('cp', { url: toUrl, ...opts });
+function makeMetadata ({ mtime, size, md5Hash, contentType }) {
+  const ms = new Date(mtime + 'Z').getTime();
+  let md = {};
+  md = { ...md, uname: 'alan', gname: 'alan', uid: 1000, gid: 1000 };
+  md = { ...md, atime: ms, ctime: ms, mtime: ms };
+  md = { ...md, size, mode: 0o644, md5: md5Hash, contentType };
+  return {
+    's3cmd-attrs': Object.keys(md)
+      .sort()
+      .map(k => `${k}:${md[k]}`)
+      .join('/')
   }
 }
 
-function doProgress (url) {
-  report('cp.start', url);
-  return data => {
-    const { bytes, done, speedo } = data;
-    const { percent, total, taken, eta, rate: speed } = speedo;
-    const payload = { bytes, percent, total, eta, speed, taken };
-    report(`cp.${done ? 'done' : 'update'}`, payload);
+function hashStream ({ algo = 'md5', enc = 'hex' } = {}) {
+  return async function * transform (source) {
+    const hasher = createHash(algo);
+    for await (const chunk of source) {
+      hasher.update(chunk);
+      yield chunk;
+    }
+    transform.hash = hasher.digest(enc);
   }
 }
 
-async function rm (url, opts = {}) {
-  url = validateUrl(url);
+async function download (source, dest, opts = {}) {
+  const { bucket, path, size, mtime, md5Hash, storage } = source;
+  const { dryRun, progress, interval = 1000, limit } = opts;
+
+  if (!storage.toLowerCase().startsWith('standard')) {
+    throw new Error(`${source.url} needs to be restored for copy`)
+  }
+
+  if (dryRun) {
+    log.colour('cyan')('%s downloaded (dryrun)', dest.path);
+    return
+  }
+
+  if (progress) log(log.cyan(dest.path));
+
+  await mkdir(dirname(dest.path), { recursive: true });
+
+  const s3 = getS3();
+  const hasher = hashStream();
+  const speedo$1 = speedo({ total: size });
+  const streams = [
+    s3.getObject({ Bucket: bucket, Key: path }).createReadStream(),
+    hasher,
+    limit && throttle(limit),
+    progress && speedo$1,
+    progress && progressStream({ onProgress, interval, speedo: speedo$1 }),
+    createWriteStream(dest.path)
+  ].filter(Boolean);
+
+  await pipeline(...streams);
+  /* c8 ignore next 3 */
+  if (hasher.hash !== md5Hash) {
+    throw new Error(`Error downloading ${source.url} to ${dest.path}`)
+  }
+
+  const tm = new Date(mtime + 'Z');
+  await utimes(dest.path, tm, tm);
+
+  insertLocalFile({ ...dest, md5Hash, size, mtime });
+}
+
+async function cp (src, dst, opts = {}) {
+  src = File.fromUrl(src, { resolve: true });
+  dst = File.fromUrl(dst, { resolve: true });
+  const uploading = isUploading(src, dst);
+
+  await src.stat();
+
+  if (uploading) {
+    await upload(src, dst, opts);
+  } else {
+    await download(src, dst, opts);
+  }
+
+  if (!opts.dryRun && !opts.progress && !opts.quiet) log(dst.url);
+}
+
+async function rename$1 (from, to, opts = {}) {
   const { dryRun } = opts;
-  if (dryRun) return report('rm.dryrun', url)
-  report('rm', url);
-  await remove(url);
+  if (dryRun) {
+    log(log.blue(from.path));
+    log(log.cyan(` -> ${to.path} renamed (dryrun)`));
+    return
+  }
+
+  await mkdir(dirname(to.path), { recursive: true });
+  await rename$2(from.path, to.path);
+  let dir = dirname(from.path);
+  while (true) {
+    try {
+      await rmdir(dir);
+    } catch (err) {
+      if (err.code === 'ENOTEMPTY') break
+      throw err
+    }
+    dir = dirname(dir);
+  }
+  log(log.blue(from.path));
+  log(log.cyan(` -> ${to.path} renamed`));
+
+  moveLocalFile({ oldPath: from.path, newPath: to.path });
+}
+
+async function remove$1 (file, opts) {
+  const { dryRun } = opts;
+  if (dryRun) {
+    log(log.cyan(`${file.path} deleted (dryrun)`));
+    return
+  }
+  await unlink(file.path);
+  let dir = dirname(file.path);
+  while (true) {
+    try {
+      await rmdir(dir);
+    } catch (err) {
+      if (err.code === 'ENOTEMPTY') break
+      throw err
+    }
+    dir = dirname(dir);
+  }
+  removeLocalFile(file);
+  log(log.cyan(`${file.path} deleted`));
+}
+
+async function rename (from, to, opts = {}) {
+  const { dryRun } = opts;
+
+  if (dryRun) {
+    log(log.blue(from.url));
+    log(log.cyan(` -> ${to.url} renamed (dryrun)`));
+    return
+  }
+
+  const s3 = getS3();
+  await s3
+    .copyObject({
+      Bucket: to.bucket,
+      Key: to.path,
+      CopySource: `${from.bucket}/${from.path}`,
+      MetadataDirective: 'COPY'
+    })
+    .promise();
+
+  await s3
+    .deleteObject({
+      Bucket: from.bucket,
+      Key: from.path
+    })
+    .promise();
+  log(log.blue(from.url));
+  log(log.cyan(` -> ${to.url} renamed`));
+  moveS3file({
+    bucket: from.bucket,
+    oldPath: from.path,
+    newPath: to.path
+  });
+}
+
+async function remove (file, opts) {
+  const { dryRun } = opts;
+
+  if (dryRun) {
+    log(log.cyan(`${file.url} removed (dryrun)`));
+    return
+  }
+
+  const s3 = getS3();
+  await s3.deleteObject({ Bucket: file.bucket, Key: file.path }).promise();
+  removeS3file(file);
+  log(log.cyan(`${file.url} removed`));
 }
 
 async function sync (srcRoot, dstRoot, opts = {}) {
-  srcRoot = validateUrl(srcRoot, { dir: true });
-  dstRoot = validateUrl(dstRoot, { dir: true });
+  srcRoot = File.fromUrl(srcRoot, { resolve: true, directory: true });
+  dstRoot = File.fromUrl(dstRoot, { resolve: true, directory: true });
+  const uploading = isUploading(srcRoot, dstRoot);
 
-  clearSync();
-  let scanCount = 0;
-  report('sync.scan.start');
+  await srcRoot.scan();
+  await dstRoot.scan();
+  checkDuplicates();
 
-  await Promise.all([
-    scanFiles(srcRoot, 'src', opts.filter),
-    scanFiles(dstRoot, 'dst', opts.filter)
-  ]);
+  const updatedFiles = new Set();
 
-  report('sync.scan.done');
+  const roots = {
+    localRoot: uploading ? srcRoot.url : dstRoot.url,
+    s3Root: uploading ? dstRoot.url : srcRoot.url
+  };
 
-  for (const { url, path } of selectMissingFiles()) {
-    await cp(url, dstRoot + path, { ...opts, progress: true });
+  // add in new from source
+  const sql = uploading ? findLocalNotRemote : findRemoteNotLocal;
+
+  for (const row of sql.all(roots)) {
+    const type = uploading ? 'local' : 's3';
+    const src = new File({ type, ...row });
+    const dest = src.rebase(srcRoot, dstRoot);
+    if (uploading) {
+      await upload(src, dest, { ...opts, progress: true });
+    } else {
+      await download(src, dest, { ...opts, progress: true });
+    }
+    updatedFiles.add(dest.url);
   }
 
-  for (const url of selectMissingHashes()) {
-    report('sync.hash', url);
-    await getHash(url);
+  // rename files on destination
+  for (const row of findDifferentPaths.all(roots)) {
+    const { local, remote } = getDifferentFiles(row, srcRoot, dstRoot);
+    if (uploading) {
+      const dest = local.rebase(srcRoot, dstRoot);
+      if (remote.storage.toLowerCase().startsWith('standard')) {
+        await rename(remote, dest, opts);
+      } else {
+        await upload(local, dest, { ...opts, progress: true });
+        await remove(remote);
+      }
+      updatedFiles.add(dest.url);
+    } else {
+      const dest = remote.rebase(srcRoot, dstRoot);
+      await rename$1(local, dest, opts);
+      updatedFiles.add(dest.url);
+    }
   }
 
-  for (const { from, to } of selectChanged()) {
-    await cp(from, to, { ...opts, progress: true });
-  }
-
+  // delete extra from destination
   if (opts.delete) {
-    for (const url of selectSurplusFiles()) {
-      await rm(url, opts);
+    const sql = uploading ? findRemoteNotLocal : findLocalNotRemote;
+    const type = uploading ? 's3' : 'local';
+    for (const row of sql.all(roots)) {
+      const file = new File({ type, ...row });
+      if (updatedFiles.has(file.url)) continue
+      if (uploading) {
+        await remove(file, opts);
+      } else {
+        await remove$1(file, opts);
+      }
     }
   }
-  report('sync.done', countFiles());
+  cleanup();
+}
 
-  async function scanFiles (root, type, filter) {
-    if (filter) {
-      const r = new RegExp(filter);
-      filter = x => r.test(x.path);
-    }
-    const lister = list(root);
-    lister.on('files', files => {
-      if (filter) files = files.filter(filter);
-      scanCount += files.length;
-      report('sync.scan', { count: scanCount });
-      insertSyncFiles(type, files);
-    });
-    await lister.done;
+function checkDuplicates () {
+  const dups = findDuplicates.all();
+  if (!dups.length) return
+
+  log('\nDUPLICATES FOUND');
+  for (const { contentId, url } of dups) {
+    log('%d - %s', contentId, url);
+  }
+  process.exit();
+}
+
+function getDifferentFiles (row, srcRoot, dstRoot) {
+  const localRoot = srcRoot.isLocal ? srcRoot : dstRoot;
+  const remoteRoot = srcRoot.isS3 ? srcRoot : dstRoot;
+  const local = new File({
+    type: 'local',
+    path: localRoot.path + row.localPath,
+    mtime: row.localMtime,
+    size: row.size,
+    contentType: row.contentType,
+    md5Hash: row.md5Hash
+  });
+  const remote = new File({
+    type: 's3',
+    bucket: remoteRoot.bucket,
+    path: remoteRoot.path + row.remotePath,
+    storage: row.storage,
+    mtime: row.remoteMtime,
+    size: row.size,
+    contentType: row.contentType,
+    md5Hash: row.md5Hash
+  });
+  return { local, remote }
+}
+
+async function rm (file, opts = {}) {
+  file = File.fromUrl(file, { resolve: true });
+  await file.stat();
+  if (file.isS3) {
+    await remove(file, opts);
+  } else {
+    await remove$1(file, opts);
   }
 }
 
@@ -1028,10 +1061,11 @@ const version = '2.0.9';
 prog.version(version);
 
 prog
-  .command('ls <url>', 'list the files under a dir')
-  .option('-l, --long', 'show more detail')
-  .option('-t, --total', 'include a total in long listing')
-  .option('-H, --human', 'show human sizes in long listing')
+  .command('ls <url>', 'list files')
+  .option('-r --rescan', 'rescan before listing')
+  .option('-l --long', 'show long listing')
+  .option('-H --human', 'show amount in human sizes')
+  .option('-t --total', 'show grand total')
   .action(ls);
 
 prog
@@ -1046,7 +1080,6 @@ prog
   .option('-l, --limit', 'limit rate')
   .option('-n, --dry-run', 'show what would be done')
   .option('-d, --delete', 'delete extra files on the destination')
-  .option('-f, --filter', 'apply a regexp filter to the pathnames')
   .action(sync);
 
 prog

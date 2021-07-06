@@ -1,65 +1,119 @@
+import log from 'logjs'
+
 import {
-  clearSync,
-  insertSyncFiles,
-  selectMissingFiles,
-  selectMissingHashes,
-  selectChanged,
-  selectSurplusFiles,
-  countFiles
-} from './db/index.mjs'
-import cp from './cp.mjs'
-import remove from './rm.mjs'
-import { list, getHash } from './vfs.mjs'
-import report from './report.mjs'
-import { validateUrl } from './util.mjs'
+  cleanup,
+  findDuplicates,
+  findLocalNotRemote,
+  findRemoteNotLocal,
+  findDifferentPaths
+} from './db/sql.mjs'
+import File from './lib/file.mjs'
+import { isUploading } from './util.mjs'
+import localRename from './local/rename.mjs'
+import localRemove from './local/remove.mjs'
+import upload from './s3/upload.mjs'
+import download from './s3/download.mjs'
+import s3rename from './s3/rename.mjs'
+import s3remove from './s3/remove.mjs'
 
 export default async function sync (srcRoot, dstRoot, opts = {}) {
-  srcRoot = validateUrl(srcRoot, { dir: true })
-  dstRoot = validateUrl(dstRoot, { dir: true })
+  srcRoot = File.fromUrl(srcRoot, { resolve: true, directory: true })
+  dstRoot = File.fromUrl(dstRoot, { resolve: true, directory: true })
+  const uploading = isUploading(srcRoot, dstRoot)
 
-  clearSync()
-  let scanCount = 0
-  report('sync.scan.start')
+  await srcRoot.scan()
+  await dstRoot.scan()
+  checkDuplicates()
 
-  await Promise.all([
-    scanFiles(srcRoot, 'src', opts.filter),
-    scanFiles(dstRoot, 'dst', opts.filter)
-  ])
+  const updatedFiles = new Set()
 
-  report('sync.scan.done')
-
-  for (const { url, path } of selectMissingFiles()) {
-    await cp(url, dstRoot + path, { ...opts, progress: true })
+  const roots = {
+    localRoot: uploading ? srcRoot.url : dstRoot.url,
+    s3Root: uploading ? dstRoot.url : srcRoot.url
   }
 
-  for (const url of selectMissingHashes()) {
-    report('sync.hash', url)
-    await getHash(url)
+  // add in new from source
+  const sql = uploading ? findLocalNotRemote : findRemoteNotLocal
+
+  for (const row of sql.all(roots)) {
+    const type = uploading ? 'local' : 's3'
+    const src = new File({ type, ...row })
+    const dest = src.rebase(srcRoot, dstRoot)
+    if (uploading) {
+      await upload(src, dest, { ...opts, progress: true })
+    } else {
+      await download(src, dest, { ...opts, progress: true })
+    }
+    updatedFiles.add(dest.url)
   }
 
-  for (const { from, to } of selectChanged()) {
-    await cp(from, to, { ...opts, progress: true })
+  // rename files on destination
+  for (const row of findDifferentPaths.all(roots)) {
+    const { local, remote } = getDifferentFiles(row, srcRoot, dstRoot)
+    if (uploading) {
+      const dest = local.rebase(srcRoot, dstRoot)
+      if (remote.storage.toLowerCase().startsWith('standard')) {
+        await s3rename(remote, dest, opts)
+      } else {
+        await upload(local, dest, { ...opts, progress: true })
+        await s3remove(remote)
+      }
+      updatedFiles.add(dest.url)
+    } else {
+      const dest = remote.rebase(srcRoot, dstRoot)
+      await localRename(local, dest, opts)
+      updatedFiles.add(dest.url)
+    }
   }
 
+  // delete extra from destination
   if (opts.delete) {
-    for (const url of selectSurplusFiles()) {
-      await remove(url, opts)
+    const sql = uploading ? findRemoteNotLocal : findLocalNotRemote
+    const type = uploading ? 's3' : 'local'
+    for (const row of sql.all(roots)) {
+      const file = new File({ type, ...row })
+      if (updatedFiles.has(file.url)) continue
+      if (uploading) {
+        await s3remove(file, opts)
+      } else {
+        await localRemove(file, opts)
+      }
     }
   }
-  report('sync.done', countFiles())
+  cleanup()
+}
 
-  async function scanFiles (root, type, filter) {
-    if (filter) {
-      const r = new RegExp(filter)
-      filter = x => r.test(x.path)
-    }
-    const lister = list(root)
-    lister.on('files', files => {
-      if (filter) files = files.filter(filter)
-      scanCount += files.length
-      report('sync.scan', { count: scanCount })
-      insertSyncFiles(type, files)
-    })
-    await lister.done
+function checkDuplicates () {
+  const dups = findDuplicates.all()
+  if (!dups.length) return
+
+  log('\nDUPLICATES FOUND')
+  for (const { contentId, url } of dups) {
+    log('%d - %s', contentId, url)
   }
+  process.exit()
+}
+
+function getDifferentFiles (row, srcRoot, dstRoot) {
+  const localRoot = srcRoot.isLocal ? srcRoot : dstRoot
+  const remoteRoot = srcRoot.isS3 ? srcRoot : dstRoot
+  const local = new File({
+    type: 'local',
+    path: localRoot.path + row.localPath,
+    mtime: row.localMtime,
+    size: row.size,
+    contentType: row.contentType,
+    md5Hash: row.md5Hash
+  })
+  const remote = new File({
+    type: 's3',
+    bucket: remoteRoot.bucket,
+    path: remoteRoot.path + row.remotePath,
+    storage: row.storage,
+    mtime: row.remoteMtime,
+    size: row.size,
+    contentType: row.contentType,
+    md5Hash: row.md5Hash
+  })
+  return { local, remote }
 }

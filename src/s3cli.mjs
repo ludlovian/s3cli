@@ -12,10 +12,11 @@ const version = '__VERSION__'
 prog.version(version)
 
 prog
-  .command('ls <url>', 'list the files under a dir')
-  .option('-l, --long', 'show more detail')
-  .option('-t, --total', 'include a total in long listing')
-  .option('-H, --human', 'show human sizes in long listing')
+  .command('ls <url>', 'list files')
+  .option('-r --rescan', 'rescan before listing')
+  .option('-l --long', 'show long listing')
+  .option('-H --human', 'show amount in human sizes')
+  .option('-t --total', 'show grand total')
   .action(ls)
 
 prog
@@ -30,7 +31,6 @@ prog
   .option('-l, --limit', 'limit rate')
   .option('-n, --dry-run', 'show what would be done')
   .option('-d, --delete', 'delete extra files on the destination')
-  .option('-f, --filter', 'apply a regexp filter to the pathnames')
   .action(sync)
 
 prog

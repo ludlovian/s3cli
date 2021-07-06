@@ -10,6 +10,7 @@ export default SQL
 
 function statement (data) {
   function exec (...args) {
+    args = args.map(cleanArgs)
     if (!data.sqlList) data.sqlList = data.sql.split(';')
     if (!data.prepared) data.prepared = []
     const { prepared, sqlList, pluck, raw, get, all } = data
@@ -33,6 +34,15 @@ function statement (data) {
     get: { get: () => statement({ ...data, get: true }) },
     all: { get: () => statement({ ...data, all: true }) }
   })
+}
+
+function cleanArgs (x) {
+  if (!x || typeof x !== 'object') return x
+  x = { ...x }
+  for (const k in x) {
+    if (x[k] instanceof Date) x[k] = x[k].toISOString()
+  }
+  return x
 }
 
 function transaction (_fn) {

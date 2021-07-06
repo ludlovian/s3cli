@@ -1,38 +1,22 @@
-import retry from 'retry'
+import log from 'logjs'
 
-import { copy } from './vfs.mjs'
-import { validateUrl } from './util.mjs'
-import report from './report.mjs'
+import File from './lib/file.mjs'
+import upload from './s3/upload.mjs'
+import download from './s3/download.mjs'
+import { isUploading } from './util.mjs'
 
-export default async function cp (fromUrl, toUrl, opts = {}) {
-  fromUrl = validateUrl(fromUrl)
-  toUrl = validateUrl(toUrl)
+export default async function cp (src, dst, opts = {}) {
+  src = File.fromUrl(src, { resolve: true })
+  dst = File.fromUrl(dst, { resolve: true })
+  const uploading = isUploading(src, dst)
 
-  const { limit, progress, dryRun } = opts
-  if (dryRun) return report('cp.dryrun', { url: toUrl })
+  await src.stat()
 
-  const copyOpts = {
-    limit,
-    onProgress: progress ? doProgress(toUrl) : undefined
-  }
-  const retryOpts = {
-    retries: 5,
-    delay: 5000,
-    onRetry: data => report('retry', data)
+  if (uploading) {
+    await upload(src, dst, opts)
+  } else {
+    await download(src, dst, opts)
   }
 
-  await retry(() => copy(fromUrl, toUrl, copyOpts), retryOpts)
-  if (!progress) {
-    report('cp', { url: toUrl, ...opts })
-  }
-}
-
-function doProgress (url) {
-  report('cp.start', url)
-  return data => {
-    const { bytes, done, speedo } = data
-    const { percent, total, taken, eta, rate: speed } = speedo
-    const payload = { bytes, percent, total, eta, speed, taken }
-    report(`cp.${done ? 'done' : 'update'}`, payload)
-  }
+  if (!opts.dryRun && !opts.progress && !opts.quiet) log(dst.url)
 }

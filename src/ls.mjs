@@ -1,24 +1,40 @@
-import { list } from './vfs.mjs'
-import report from './report.mjs'
+import log from 'logjs'
 
-export default async function ls (url, options) {
-  let totalCount = 0
-  let totalSize = 0
+import File from './lib/file.mjs'
+import { comma, fmtSize } from './util.mjs'
+import { listLocalFiles, listS3files } from './db/sql.mjs'
 
-  const lister = list(url)
-  lister.on('files', files => {
-    files.forEach(file => {
-      totalCount++
-      totalSize += file.size || 0
-      file.storage = STORAGE_CLASS[file.storage] || 'F'
-      report('list.file', { ...options, ...file })
-    })
-  })
-  await lister.done
-  report('list.file.totals', { ...options, totalSize, totalCount })
+export default async function ls (url, opts) {
+  const { long, rescan, human, total } = opts
+  url = File.fromUrl(url, { resolve: true })
+
+  if (rescan) await url.scan()
+
+  let nTotalCount = 0
+  let nTotalSize = 0
+
+  const sql = url.isLocal ? listLocalFiles : listS3files
+  for (const row of sql.all(url)) {
+    const { path, mtime, size, storage } = row
+    nTotalCount++
+    nTotalSize += size
+    let s = ''
+    if (long) {
+      s = (STORAGE[storage] || 'F') + '  '
+      const sz = human ? fmtSize(size) : size.toString()
+      s += sz.padStart(10) + '  '
+      s += mtime + '  '
+    }
+    s += path
+    log(s)
+  }
+  if (total) {
+    const sz = human ? `${fmtSize(nTotalSize)}B` : `${comma(nTotalSize)} bytes`
+    log(`\n${sz} in ${comma(nTotalCount)} file${nTotalCount > 1 ? 's' : ''}`)
+  }
 }
 
-const STORAGE_CLASS = {
+const STORAGE = {
   STANDARD: 'S',
   STANDARD_IA: 'I',
   GLACIER: 'G',
