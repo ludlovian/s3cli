@@ -56,3 +56,20 @@ SELECT  f.path          AS path,
 FROM    local_file f
 JOIN    content c USING (contentId)
 ORDER BY f.path;
+
+CREATE VIEW IF NOT EXISTS content_use_view AS
+SELECT  c.contentId     AS  contentId,
+        count(l.contentId)
+                        AS  local_use,
+        count(r.contentId)
+                        AS  remote_use
+
+FROM    content c
+
+LEFT JOIN local_file l
+    USING (contentId)
+
+LEFT JOIN s3_file r
+    USING (contentId)
+
+GROUP BY c.contentId;

@@ -1,11 +1,11 @@
-import log from 'logjs'
-
 import {
   cleanup,
   findDuplicates,
   findLocalNotRemote,
   findRemoteNotLocal,
-  findDifferentPaths
+  findDifferentPaths,
+  findLocalContent,
+  findRemoteContent
 } from './db/sql.mjs'
 import File from './lib/file.mjs'
 import { isUploading } from './util.mjs'
@@ -23,7 +23,6 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
 
   await srcRoot.scan()
   await dstRoot.scan()
-  checkDuplicates()
 
   const updatedFiles = new Set()
 
@@ -66,6 +65,41 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
     }
   }
 
+  // handle complex (multi-copy) matches
+  for (const contentId of findDuplicates.pluck().all()) {
+    const local = findLocalContent
+      .all({ contentId, ...roots })
+      .map(row => new File(row))
+    const remote = findRemoteContent
+      .all({ contentId, ...roots })
+      .map(row => new File(row))
+    const [src, dst] = uploading ? [local, remote] : [remote, local]
+    const seen = new Set()
+    for (const s of src) {
+      const d = s.rebase(srcRoot, dstRoot)
+      if (!dst.find(f => f.url === d.url)) {
+        if (uploading) {
+          await upload(s, d, { ...opts, progress: true })
+        } else {
+          await download(s, d, { ...opts, progress: true })
+        }
+      }
+      seen.add(d.url)
+    }
+
+    if (opts.delete) {
+      for (const d of dst) {
+        if (!seen.has(d.url)) {
+          if (uploading) {
+            await s3remove(d, opts)
+          } else {
+            await localRemove(d, opts)
+          }
+        }
+      }
+    }
+  }
+
   // delete extra from destination
   if (opts.delete) {
     const sql = uploading ? findRemoteNotLocal : findLocalNotRemote
@@ -81,17 +115,6 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
     }
   }
   cleanup()
-}
-
-function checkDuplicates () {
-  const dups = findDuplicates.all()
-  if (!dups.length) return
-
-  log('\nDUPLICATES FOUND')
-  for (const { contentId, url } of dups) {
-    log('%d - %s', contentId, url)
-  }
-  process.exit()
 }
 
 function getDifferentFiles (row, srcRoot, dstRoot) {

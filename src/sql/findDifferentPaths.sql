@@ -32,6 +32,7 @@ SELECT  lp.rel_path     AS localPath,
 FROM    local_file l
 JOIN    s3_file r USING (contentId)
 JOIN    content c USING (contentId)
+JOIN    content_use_view u USING (contentId)
 
 JOIN    loc_path lp
     ON  lp.path = l.path
@@ -43,6 +44,8 @@ JOIN    rem_path rp
 WHERE   'file://' || l.path LIKE $localRoot || '%'
 AND     's3://' || r.bucket || '/' || r.path LIKE $s3Root || '%'
 AND     lp.rel_path != rp.rel_path
+AND     u.remote_use = 1
+AND     u.local_use = 1
 
 ORDER BY lp.rel_path;
 

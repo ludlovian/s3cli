@@ -4,12 +4,6 @@
 --      localRoot
 --      s3Root
 
-WITH remoteContent AS (
-    SELECT  contentId
-    FROM    s3_file
-    WHERE   's3://' || bucket || '/' || path LIKE $s3Root || '%'
-)
-
 SELECT  f.path      AS path,
         f.mtime     AS mtime,
         c.size      AS size,
@@ -17,12 +11,12 @@ SELECT  f.path      AS path,
                     AS contentType,
         c.md5Hash   AS md5Hash
 
-FROM    local_file f
-JOIN    content c USING (contentId)
-WHERE   f.contentId NOT IN (
-            SELECT  contentId
-            FROM    remoteContent
-        )
+FROM    local_file       f
+JOIN    content          c  USING (contentId)
+JOIN    content_use_view u  USING (contentId)
+
+WHERE   u.remote_use = 0
+AND     u.local_use = 1
 AND     'file://' || f.path
             LIKE $localRoot || '%'
 
