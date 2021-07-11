@@ -3,7 +3,7 @@ import { dirname } from 'path'
 
 import log from 'logjs'
 
-import { removeLocalFile } from '../db/sql.mjs'
+import { removeFile } from './sql.mjs'
 
 export default async function remove (file, opts) {
   const { dryRun } = opts
@@ -22,6 +22,6 @@ export default async function remove (file, opts) {
     }
     dir = dirname(dir)
   }
-  removeLocalFile(file)
+  removeFile(file)
   log(log.cyan(`${file.path} deleted`))
 }

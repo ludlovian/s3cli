@@ -1,12 +1,27 @@
 import { readdir } from 'fs/promises'
 import { join } from 'path'
 
+import { sql } from '../db/index.mjs'
+import { markFilesOld, insertFile, cleanFiles } from './sql.mjs'
+
 export default async function * scan (root) {
-  yield * scanDir(root.path)
+  const File = root.constructor
+
+  let n = 0
+  markFilesOld(root)
+  const insertFiles = sql.transaction(files => {
+    files.forEach(file => insertFile(file))
+  })
+
+  for await (const files of scanDir(root.path, File)) {
+    n += files.length
+    insertFiles(files)
+    yield n
+  }
+  cleanFiles()
 }
 
-async function * scanDir (dir) {
-  const File = (await import('../lib/file.mjs')).default
+async function * scanDir (dir, File) {
   const entries = await readdir(dir, { withFileTypes: true })
   const files = []
   const dirs = []
@@ -20,6 +35,6 @@ async function * scanDir (dir) {
   }
   if (files.length) yield files
   for (const dir of dirs) {
-    yield * scanDir(dir)
+    yield * scanDir(dir, File)
   }
 }

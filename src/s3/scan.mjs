@@ -1,8 +1,18 @@
 import { getS3 } from './util.mjs'
 
+import { sql } from '../db/index.mjs'
+import { markFilesOld, insertFile, cleanFiles } from './sql.mjs'
+
 export default async function * scan (root) {
-  const File = (await import('../lib/file.mjs')).default
+  const File = root.constructor
+  let n = 0
   const s3 = getS3()
+
+  markFilesOld(root)
+  const insertFiles = sql.transaction(files => {
+    files.forEach(file => insertFile(file))
+  })
+
   const request = { Bucket: root.bucket, Prefix: root.path }
   while (true) {
     const result = await s3.listObjectsV2(request).promise()
@@ -20,9 +30,13 @@ export default async function * scan (root) {
       if (!file.hasStats) await file.stat()
       files.push(file)
     }
-    yield files
+    n += files.length
+    insertFiles(files)
+    yield n
 
     if (!result.IsTruncated) break
     request.ContinuationToken = result.NextContinuationToken
   }
+
+  cleanFiles()
 }

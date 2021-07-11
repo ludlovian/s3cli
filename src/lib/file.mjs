@@ -4,8 +4,6 @@ import mime from 'mime'
 
 import log from 'logjs'
 
-import { clearFilesBeforeScan, cleanup } from '../db/sql.mjs'
-import { insertS3Files, insertLocalFiles } from '../db/index.mjs'
 import localScan from '../local/scan.mjs'
 import localStat from '../local/stat.mjs'
 import s3scan from '../s3/scan.mjs'
@@ -29,6 +27,10 @@ export default class File {
       return File.fromUrl('file://' + url, opts)
     }
     throw new Error('Cannot understand ' + url)
+  }
+
+  static like ({ type }, data) {
+    return new File({ type, ...data })
   }
 
   constructor (data) {
@@ -79,6 +81,10 @@ export default class File {
     return !!this.md5Hash
   }
 
+  get archived () {
+    return this.isS3 && !this.storage.toLowerCase().startsWith('standard')
+  }
+
   get url () {
     if (this.isS3) {
       return `s3://${this.bucket}/${this.path}`
@@ -109,18 +115,16 @@ export default class File {
   }
 
   async scan () {
-    let n = 0
+    let total
     log.status('Scanning %s ... ', this.url)
-    clearFilesBeforeScan({ url: this.url })
+
     const scanner = this.isLocal ? localScan : s3scan
-    const insert = this.isLocal ? insertLocalFiles : insertS3Files
-    for await (const files of scanner(this)) {
-      n += files.length
-      log.status('Scanning %s ... %d', this.url, n)
-      insert(files)
+
+    for await (const count of scanner(this)) {
+      log.status('Scanning %s ... %d', this.url, count)
+      total = count
     }
-    log('%s files found on %s', n.toLocaleString(), this.url)
-    cleanup()
+    log('%s files found on %s', total.toLocaleString(), this.url)
   }
 }
 

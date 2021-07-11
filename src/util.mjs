@@ -29,3 +29,7 @@ export function fmtSize (n) {
   }
   return '0'
 }
+
+export function plural (count, noun) {
+  return comma(count) + ' ' + noun + (count === 1 ? '' : 's')
+}

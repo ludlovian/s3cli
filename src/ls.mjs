@@ -2,7 +2,7 @@ import log from 'logjs'
 
 import File from './lib/file.mjs'
 import { comma, fmtSize } from './util.mjs'
-import { listLocalFiles, listS3files } from './db/sql.mjs'
+import { sql } from './db/index.mjs'
 
 export default async function ls (url, opts) {
   const { long, rescan, human, total } = opts
@@ -40,3 +40,18 @@ const STORAGE = {
   GLACIER: 'G',
   DEEP_ARCHIVE: 'D'
 }
+
+const listLocalFiles = sql(`
+  SELECT *
+  FROM local_file_view
+  WHERE path LIKE $path || '%'
+  ORDER BY path
+`)
+
+const listS3files = sql(`
+  SELECT *
+  FROM s3_file_view
+  WHERE bucket = $bucket
+  AND   path LIKE $path || '%'
+  ORDER BY bucket, path
+`)

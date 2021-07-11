@@ -1,8 +1,7 @@
-let db
+import { getDB } from '../db/index.mjs'
 
 const SQL = {
-  from: sql => statement({ sql: tidy(sql) }),
-  attach: _db => (db = _db),
+  from: sql => statement({ stmts: tidy(sql).split(';') }),
   transaction: fn => transaction(fn)
 }
 
@@ -11,29 +10,34 @@ export default SQL
 function statement (data) {
   function exec (...args) {
     args = args.map(cleanArgs)
-    if (!data.sqlList) data.sqlList = data.sql.split(';')
-    if (!data.prepared) data.prepared = []
-    const { prepared, sqlList, pluck, raw, get, all } = data
-    const n = sqlList.length
+    const { stmts, pluck, raw, get, all } = data
+    const n = stmts.length
     for (let i = 0; i < n - 1; i++) {
-      let stmt = prepared[i]
-      if (!stmt) stmt = prepared[i] = db.prepare(sqlList[i])
-      stmt.run(...args)
+      prepare(stmts[i]).run(...args)
     }
-    let last = prepared[n - 1]
-    if (!last) last = prepared[n - 1] = db.prepare(sqlList[n - 1])
-    if (pluck) last = last.pluck()
-    if (raw) last = last.raw()
-    if (get) return last.get(...args)
-    if (all) return last.all(...args)
-    return last.run(...args)
+    let stmt = prepare(stmts[n - 1])
+    if (pluck) stmt = stmt.pluck()
+    if (raw) stmt = stmt.raw()
+    if (get) return stmt.get(...args)
+    if (all) return stmt.all(...args)
+    return stmt.run(...args)
   }
   return Object.defineProperties(exec, {
+    sql: { value: data.stmts.join(';') },
     pluck: { value: () => statement({ ...data, pluck: true }) },
     raw: { value: () => statement({ ...data, raw: true }) },
     get: { get: () => statement({ ...data, get: true }) },
     all: { get: () => statement({ ...data, all: true }) }
   })
+}
+
+const cache = new Map()
+function prepare (stmt) {
+  let p = cache.get(stmt)
+  if (p) return p
+  p = getDB().prepare(stmt)
+  cache.set(stmt, p)
+  return p
 }
 
 function cleanArgs (x) {
@@ -48,7 +52,7 @@ function cleanArgs (x) {
 function transaction (_fn) {
   let fn
   return (...args) => {
-    if (!fn) fn = db.transaction(_fn)
+    if (!fn) fn = getDB().transaction(_fn)
     return fn(...args)
   }
 }

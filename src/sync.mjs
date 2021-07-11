@@ -1,142 +1,162 @@
-import {
-  cleanup,
-  findDuplicates,
-  findLocalNotRemote,
-  findRemoteNotLocal,
-  findDifferentPaths,
-  findLocalContent,
-  findRemoteContent
-} from './db/sql.mjs'
+import { sql } from './db/index.mjs'
 import File from './lib/file.mjs'
 import { isUploading } from './util.mjs'
-import localRename from './local/rename.mjs'
+import localCopy from './local/copy.mjs'
 import localRemove from './local/remove.mjs'
 import upload from './s3/upload.mjs'
 import download from './s3/download.mjs'
-import s3rename from './s3/rename.mjs'
+import s3copy from './s3/copy.mjs'
 import s3remove from './s3/remove.mjs'
 
 export default async function sync (srcRoot, dstRoot, opts = {}) {
   srcRoot = File.fromUrl(srcRoot, { resolve: true, directory: true })
   dstRoot = File.fromUrl(dstRoot, { resolve: true, directory: true })
-  const uploading = isUploading(srcRoot, dstRoot)
+  isUploading(srcRoot, dstRoot)
+  const fn = getFunctions(srcRoot, dstRoot)
 
   await srcRoot.scan()
   await dstRoot.scan()
 
-  const updatedFiles = new Set()
+  const destFiles = new Set()
 
-  const roots = {
-    localRoot: uploading ? srcRoot.url : dstRoot.url,
-    s3Root: uploading ? dstRoot.url : srcRoot.url
+  // new files
+  for (const row of fn.newFiles(fn.paths)) {
+    const src = File.like(srcRoot, row)
+    const dst = src.rebase(srcRoot, dstRoot)
+    await fn.copy(src, dst, { ...opts, progress: true })
+    destFiles.add(dst.url)
   }
 
-  // add in new from source
-  const sql = uploading ? findLocalNotRemote : findRemoteNotLocal
-
-  for (const row of sql.all(roots)) {
-    const type = uploading ? 'local' : 's3'
-    const src = new File({ type, ...row })
-    const dest = src.rebase(srcRoot, dstRoot)
-    if (uploading) {
-      await upload(src, dest, { ...opts, progress: true })
+  // simple renames
+  for (const { contentId } of fn.differences(fn.paths)) {
+    const d = { contentId, ...fn.paths }
+    const src = File.like(srcRoot, fn.srcContent.get(d))
+    const dst = src.rebase(srcRoot, dstRoot)
+    const old = File.like(dstRoot, fn.dstContent.get(d))
+    if (!old.archived) {
+      await fn.destCopy(old, dst, opts)
     } else {
-      await download(src, dest, { ...opts, progress: true })
+      await fn.copy(src, dst, { ...opts, progress: true })
     }
-    updatedFiles.add(dest.url)
+    destFiles.add(dst.url)
   }
 
-  // rename files on destination
-  for (const row of findDifferentPaths.all(roots)) {
-    const { local, remote } = getDifferentFiles(row, srcRoot, dstRoot)
-    if (uploading) {
-      const dest = local.rebase(srcRoot, dstRoot)
-      if (remote.storage.toLowerCase().startsWith('standard')) {
-        await s3rename(remote, dest, opts)
-      } else {
-        await upload(local, dest, { ...opts, progress: true })
-        await s3remove(remote)
+  // complex renames
+  for (const { contentId } of fn.duplicates()) {
+    const d = { contentId, ...fn.paths }
+    const srcs = fn.srcContent.all(d).map(row => File.like(srcRoot, row))
+    const dsts = fn.dstContent.all(d).map(row => File.like(dstRoot, row))
+    for (const src of srcs) {
+      const dst = src.rebase(srcRoot, dstRoot)
+      if (!dsts.find(d => d.url === dst.url)) {
+        await fn.copy(src, dst, { ...opts, progress: true })
+        destFiles.add(dst.url)
       }
-      updatedFiles.add(dest.url)
-    } else {
-      const dest = remote.rebase(srcRoot, dstRoot)
-      await localRename(local, dest, opts)
-      updatedFiles.add(dest.url)
-    }
-  }
-
-  // handle complex (multi-copy) matches
-  for (const contentId of findDuplicates.pluck().all()) {
-    const local = findLocalContent
-      .all({ contentId, ...roots })
-      .map(row => new File(row))
-    const remote = findRemoteContent
-      .all({ contentId, ...roots })
-      .map(row => new File(row))
-    const [src, dst] = uploading ? [local, remote] : [remote, local]
-    const seen = new Set()
-    for (const s of src) {
-      const d = s.rebase(srcRoot, dstRoot)
-      if (!dst.find(f => f.url === d.url)) {
-        if (uploading) {
-          await upload(s, d, { ...opts, progress: true })
-        } else {
-          await download(s, d, { ...opts, progress: true })
-        }
-      }
-      seen.add(d.url)
     }
 
     if (opts.delete) {
-      for (const d of dst) {
-        if (!seen.has(d.url)) {
-          if (uploading) {
-            await s3remove(d, opts)
-          } else {
-            await localRemove(d, opts)
-          }
+      for (const dst of dsts) {
+        const src = dst.rebase(dstRoot, srcRoot)
+        if (!srcs.find(s => s.url === src.url)) {
+          await fn.remove(dst, opts)
+          destFiles.add(dst.url)
         }
       }
     }
   }
 
-  // delete extra from destination
+  // deletes
   if (opts.delete) {
-    const sql = uploading ? findRemoteNotLocal : findLocalNotRemote
-    const type = uploading ? 's3' : 'local'
-    for (const row of sql.all(roots)) {
-      const file = new File({ type, ...row })
-      if (updatedFiles.has(file.url)) continue
-      if (uploading) {
-        await s3remove(file, opts)
-      } else {
-        await localRemove(file, opts)
+    for (const row of fn.oldFiles(fn.paths)) {
+      const dst = File.like(dstRoot, row)
+      if (!destFiles.has(dst.url)) {
+        await fn.remove(dst, opts)
       }
     }
   }
-  cleanup()
 }
 
-function getDifferentFiles (row, srcRoot, dstRoot) {
-  const localRoot = srcRoot.isLocal ? srcRoot : dstRoot
-  const remoteRoot = srcRoot.isS3 ? srcRoot : dstRoot
-  const local = new File({
-    type: 'local',
-    path: localRoot.path + row.localPath,
-    mtime: row.localMtime,
-    size: row.size,
-    contentType: row.contentType,
-    md5Hash: row.md5Hash
-  })
-  const remote = new File({
-    type: 's3',
-    bucket: remoteRoot.bucket,
-    path: remoteRoot.path + row.remotePath,
-    storage: row.storage,
-    mtime: row.remoteMtime,
-    size: row.size,
-    contentType: row.contentType,
-    md5Hash: row.md5Hash
-  })
-  return { local, remote }
+function getFunctions (srcRoot, dstRoot) {
+  const paths = {
+    localPath:
+      (srcRoot.isLocal && srcRoot.path) || (dstRoot.isLocal && dstRoot.path),
+    s3Bucket:
+      (srcRoot.isS3 && srcRoot.bucket) || (dstRoot.isS3 && dstRoot.bucket),
+    s3Path: (srcRoot.isS3 && srcRoot.path) || (dstRoot.isS3 && dstRoot.path)
+  }
+  if (srcRoot.isLocal) {
+    return {
+      paths,
+      newFiles: listLocalNotRemote.all,
+      oldFiles: listRemoteNotLocal.all,
+      differences: listDifferences.all,
+      duplicates: listDuplicates.all,
+      srcContent: findLocalContent,
+      dstContent: findRemoteContent,
+      copy: upload,
+      destCopy: s3copy,
+      remove: s3remove
+    }
+  } else {
+    return {
+      paths,
+      newFiles: listRemoteNotLocal.all,
+      oldFiles: listLocalNotRemote.all,
+      differences: listDifferences.all,
+      duplicates: listDuplicates.all,
+      srcContent: findRemoteContent,
+      dstContent: findLocalContent,
+      copy: download,
+      destCopy: localCopy,
+      remove: localRemove
+    }
+  }
 }
+
+const listLocalNotRemote = sql(`
+  SELECT * FROM local_file_view
+  WHERE path LIKE $localPath || '%'
+  AND contentId NOT IN (
+    SELECT contentId
+    FROM s3_file
+    WHERE bucket = $s3Bucket
+    AND   path LIKE $s3Path || '%'
+  )
+`)
+
+const listRemoteNotLocal = sql(`
+  SELECT * FROM s3_file_view
+  WHERE bucket = $s3Bucket
+  AND   path LIKE $s3Path || '%'
+  AND   contentId NOT IN (
+    SELECT contentId
+    FROM local_file
+    WHERE path LIKE $localPath || '%'
+  )
+`)
+
+const listDifferences = sql(`
+  SELECT * FROM local_and_s3_view
+  WHERE localPath LIKE $localPath || '%'
+  AND   s3Bucket = $s3Bucket
+  AND   s3Path LIKE $s3Path || '%'
+  AND   substr(localPath, 1 + length($localPath)) !=
+          substr(s3Path, 1 + length($s3Path))
+`)
+
+const listDuplicates = sql(`
+  SELECT contentId FROM duplicates_view
+`)
+
+const findLocalContent = sql(`
+  SELECT * FROM local_file_view
+  WHERE contentId = $contentId
+  AND   path LIKE $localPath || '%'
+`)
+
+const findRemoteContent = sql(`
+  SELECT * FROM s3_file_view
+  WHERE contentId = $contentId
+  AND   bucket = $s3Bucket
+  AND   path LIKE $s3Path || '%'
+`)

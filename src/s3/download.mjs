@@ -10,7 +10,7 @@ import progressStream from 'progress-stream/gen'
 
 import log from 'logjs'
 
-import { insertLocalFile } from '../db/sql.mjs'
+import { insertFile } from '../local/sql.mjs'
 import { getS3, onProgress } from './util.mjs'
 
 export default async function download (source, dest, opts = {}) {
@@ -51,5 +51,5 @@ export default async function download (source, dest, opts = {}) {
   const tm = new Date(mtime + 'Z')
   await utimes(dest.path, tm, tm)
 
-  insertLocalFile({ ...dest, md5Hash, size, mtime })
+  insertFile({ ...dest, md5Hash, size, mtime })
 }
