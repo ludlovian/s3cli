@@ -266,6 +266,9 @@ CREATE TABLE IF NOT EXISTS local_file(
     updated     TEXT DEFAULT (datetime('now'))
 );
 
+CREATE INDEX IF NOT EXISTS local_file_i1
+  ON local_file (contentId);
+
 CREATE TRIGGER IF NOT EXISTS local_file_td
 AFTER DELETE ON local_file
 BEGIN
@@ -292,6 +295,9 @@ CREATE TABLE IF NOT EXISTS s3_file(
     updated     TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (bucket, path)
 );
+
+CREATE INDEX IF NOT EXISTS s3_file_i1
+  ON s3_file (contentId);
 
 CREATE TRIGGER IF NOT EXISTS s3_file_td
 AFTER DELETE ON s3_file
@@ -332,7 +338,8 @@ BEGIN
         (NEW.md5Hash, NEW.size, NEW.contentType)
     ON CONFLICT DO UPDATE
         SET contentType = excluded.contentType,
-            updated     = excluded.updated;
+            updated     = excluded.updated
+        WHERE contentType != excluded.contentType;
 
     INSERT INTO local_file
         (path, contentId, mtime)
@@ -346,7 +353,9 @@ BEGIN
     ON CONFLICT DO UPDATE
         SET contentId   = excluded.contentId,
             mtime       = excluded.mtime,
-            updated     = excluded.updated;
+            updated     = excluded.updated
+        WHERE contentId != excluded.contentId
+        OR    mtime     != excluded.mtime;
 END;
 
 -- S3 file
@@ -373,7 +382,8 @@ BEGIN
         (NEW.md5Hash, NEW.size, NEW.contentType)
     ON CONFLICT DO UPDATE
         SET contentType = excluded.contentType,
-            updated     = excluded.updated;
+            updated     = excluded.updated
+        WHERE contentType != excluded.contentType;
 
     INSERT INTO s3_file
         (bucket, path, contentId, mtime, storage)
@@ -390,7 +400,10 @@ BEGIN
         SET contentId   = excluded.contentId,
             mtime       = excluded.mtime,
             storage     = excluded.storage,
-            updated     = excluded.updated;
+            updated     = excluded.updated
+        WHERE contentId != excluded.contentId
+        OR    mtime     != excluded.mtime
+        OR    storage   != excluded.storage;
 END;
 
 -- On local but not on S3 --
@@ -442,22 +455,17 @@ HAVING count(contentId) > 1;
 COMMIT;
 `);
 
+const listFiles$1 = sql(`
+  SELECT path
+  FROM   local_file
+  WHERE  path like $path || '%'
+`);
+
 const insertFile$1 = sql(`
   INSERT INTO local_file_view
     (path, size, mtime, contentType, md5Hash)
   VALUES
     ($path, $size, $mtime, $contentType, $md5Hash)
-`);
-
-const markFilesOld$1 = sql(`
-  UPDATE local_file
-  SET    updated = NULL
-  WHERE  path LIKE $path || '%'
-`);
-
-const cleanFiles$1 = sql(`
-  DELETE FROM local_file
-  WHERE  updated IS NULL
 `);
 
 const removeFile$1 = sql(`
@@ -477,9 +485,18 @@ async function * scan$1 (root) {
   const File = root.constructor;
 
   let n = 0;
-  markFilesOld$1(root);
+  const old = new Set(listFiles$1.pluck().all(root));
+
   const insertFiles = sql.transaction(files => {
-    files.forEach(file => insertFile$1(file));
+    for (const file of files) {
+      insertFile$1(file);
+      old.delete(file.path);
+    }
+  });
+  const deleteOld = sql.transaction(paths => {
+    for (const path of paths) {
+      removeFile$1({ path });
+    }
   });
 
   for await (const files of scanDir(root.path, File)) {
@@ -487,7 +504,7 @@ async function * scan$1 (root) {
     insertFiles(files);
     yield n;
   }
-  cleanFiles$1();
+  deleteOld([...old]);
 }
 
 async function * scanDir (dir, File) {
@@ -528,10 +545,13 @@ async function stat$1 (file) {
   }
 }
 
-function isUploading (src, dst) {
-  if (src.isLocal && dst.isS3) return true
-  if (src.isS3 && dst.isLocal) return false
-  throw new Error('Must either upload or download')
+function getDirection (src, dst) {
+  const validDirections = new Set(['local_s3', 's3_local']);
+  const dir = src.type + '_' + dst.type;
+  if (!validDirections.has(dir)) {
+    throw new Error(`Cannot do ${src.type} -> ${dst.type}`)
+  }
+  return dir
 }
 
 function comma (n) {
@@ -599,16 +619,11 @@ const insertFile = sql(`
     ($bucket, $path, $size, $mtime, $storage, $contentType, $md5Hash)
 `);
 
-const markFilesOld = sql(`
-  UPDATE s3_file
-  SET    updated = NULL
-  WHERE  bucket = $bucket
-  AND    path LIKE $path || '%'
-`);
-
-const cleanFiles = sql(`
-  DELETE FROM s3_file
-  WHERE  updated IS NULL
+const listFiles = sql(`
+  SELECT  bucket, path
+  FROM    s3_file
+  WHERE   bucket = $bucket
+  AND     path LIKE $path || '%'
 `);
 
 const removeFile = sql(`
@@ -622,9 +637,20 @@ async function * scan (root) {
   let n = 0;
   const s3 = getS3();
 
-  markFilesOld(root);
+  const old = new Set(listFiles.all(root).map(r => r.path));
+
   const insertFiles = sql.transaction(files => {
-    files.forEach(file => insertFile(file));
+    for (const file of files) {
+      insertFile(file);
+      old.delete(file.path);
+    }
+  });
+
+  const deleteOld = sql.transaction(paths => {
+    const { bucket } = root;
+    for (const path of paths) {
+      removeFile({ bucket, path });
+    }
   });
 
   const request = { Bucket: root.bucket, Prefix: root.path };
@@ -652,7 +678,7 @@ async function * scan (root) {
     request.ContinuationToken = result.NextContinuationToken;
   }
 
-  cleanFiles();
+  deleteOld([...old]);
 }
 
 const MD_KEY = 's3cmd-attrs';
@@ -797,7 +823,10 @@ class File {
     let total;
     log.status('Scanning %s ... ', this.url);
 
-    const scanner = this.isLocal ? scan$1 : scan;
+    const scanner = {
+      local: scan$1,
+      s3: scan
+    }[this.type];
 
     for await (const count of scanner(this)) {
       log.status('Scanning %s ... %d', this.url, count);
@@ -821,13 +850,17 @@ async function ls (url, opts) {
   const { long, rescan, human, total } = opts;
   url = File.fromUrl(url, { resolve: true });
 
+  const list = {
+    local: localList.all,
+    s3: s3List.all
+  }[url.type];
+
   if (rescan) await url.scan();
 
   let nTotalCount = 0;
   let nTotalSize = 0;
 
-  const sql = url.isLocal ? listLocalFiles : listS3files;
-  for (const row of sql.all(url)) {
+  for (const row of list(url)) {
     const { path, mtime, size, storage } = row;
     nTotalCount++;
     nTotalSize += size;
@@ -854,14 +887,14 @@ const STORAGE = {
   DEEP_ARCHIVE: 'D'
 };
 
-const listLocalFiles = sql(`
+const localList = sql(`
   SELECT *
   FROM local_file_view
   WHERE path LIKE $path || '%'
   ORDER BY path
 `);
 
-const listS3files = sql(`
+const s3List = sql(`
   SELECT *
   FROM s3_file_view
   WHERE bucket = $bucket
@@ -1102,15 +1135,15 @@ async function download (source, dest, opts = {}) {
 async function cp (src, dst, opts = {}) {
   src = File.fromUrl(src, { resolve: true });
   dst = File.fromUrl(dst, { resolve: true });
-  const uploading = isUploading(src, dst);
+  const dir = getDirection(src, dst);
+  const fns = {
+    local_s3: upload,
+    s3_local: download
+  };
+  const fn = fns[dir];
 
   await src.stat();
-
-  if (uploading) {
-    await upload(src, dst, opts);
-  } else {
-    await download(src, dst, opts);
-  }
+  await fn(src, dst, opts);
 
   if (!opts.dryRun && !opts.progress && !opts.quiet) log(dst.url);
 }
@@ -1198,20 +1231,19 @@ async function remove (file, opts) {
 async function sync (srcRoot, dstRoot, opts = {}) {
   srcRoot = File.fromUrl(srcRoot, { resolve: true, directory: true });
   dstRoot = File.fromUrl(dstRoot, { resolve: true, directory: true });
-  isUploading(srcRoot, dstRoot);
   const fn = getFunctions(srcRoot, dstRoot);
 
   await srcRoot.scan();
   await dstRoot.scan();
 
-  const destFiles = new Set();
+  const seen = new Set();
 
   // new files
   for (const row of fn.newFiles(fn.paths)) {
     const src = File.like(srcRoot, row);
     const dst = src.rebase(srcRoot, dstRoot);
     await fn.copy(src, dst, { ...opts, progress: true });
-    destFiles.add(dst.url);
+    seen.add(dst.path);
   }
 
   // simple renames
@@ -1225,7 +1257,7 @@ async function sync (srcRoot, dstRoot, opts = {}) {
     } else {
       await fn.copy(src, dst, { ...opts, progress: true });
     }
-    destFiles.add(dst.url);
+    seen.add(dst.path);
   }
 
   // complex renames
@@ -1242,7 +1274,7 @@ async function sync (srcRoot, dstRoot, opts = {}) {
         } else {
           await fn.copy(src, dst, { ...opts, progress: true });
         }
-        destFiles.add(dst.url);
+        seen.add(dst.path);
       }
     }
 
@@ -1251,7 +1283,7 @@ async function sync (srcRoot, dstRoot, opts = {}) {
         const src = dst.rebase(dstRoot, srcRoot);
         if (!srcs.find(s => s.url === src.url)) {
           await fn.remove(dst, opts);
-          destFiles.add(dst.url);
+          seen.add(dst.path);
         }
       }
     }
@@ -1261,51 +1293,49 @@ async function sync (srcRoot, dstRoot, opts = {}) {
   if (opts.delete) {
     for (const row of fn.oldFiles(fn.paths)) {
       const dst = File.like(dstRoot, row);
-      if (!destFiles.has(dst.url)) {
+      if (!seen.has(dst.path)) {
         await fn.remove(dst, opts);
       }
     }
   }
 }
 
-function getFunctions (srcRoot, dstRoot) {
+function getFunctions (src, dst) {
+  const dir = getDirection(src, dst);
   const paths = {
-    localPath:
-      (srcRoot.isLocal && srcRoot.path) || (dstRoot.isLocal && dstRoot.path),
-    s3Bucket:
-      (srcRoot.isS3 && srcRoot.bucket) || (dstRoot.isS3 && dstRoot.bucket),
-    s3Path: (srcRoot.isS3 && srcRoot.path) || (dstRoot.isS3 && dstRoot.path)
+    localPath: (src.isLocal && src.path) || (dst.isLocal && dst.path),
+    s3Bucket: (src.isS3 && src.bucket) || (dst.isS3 && dst.bucket),
+    s3Path: (src.isS3 && src.path) || (dst.isS3 && dst.path)
   };
-  if (srcRoot.isLocal) {
-    return {
+  return {
+    local_s3: {
       paths,
-      newFiles: listLocalNotRemote.all,
-      oldFiles: listRemoteNotLocal.all,
-      differences: listDifferences.all,
-      duplicates: listDuplicates.all,
-      srcContent: findLocalContent,
-      dstContent: findRemoteContent,
+      newFiles: localNotS3.all,
+      oldFiles: s3NotLocal.all,
+      differences: localS3Diff.all,
+      duplicates: duplicates.all,
+      srcContent: localContent,
+      dstContent: s3Content,
       copy: upload,
       destCopy: copy,
       remove: remove
-    }
-  } else {
-    return {
+    },
+    s3_local: {
       paths,
-      newFiles: listRemoteNotLocal.all,
-      oldFiles: listLocalNotRemote.all,
-      differences: listDifferences.all,
-      duplicates: listDuplicates.all,
-      srcContent: findRemoteContent,
-      dstContent: findLocalContent,
+      newFiles: s3NotLocal.all,
+      oldFiles: localNotS3.all,
+      differences: localS3Diff.all,
+      duplicates: duplicates.all,
+      srcContent: s3Content,
+      dstContent: localContent,
       copy: download,
       destCopy: copy$1,
       remove: remove$1
     }
-  }
+  }[dir]
 }
 
-const listLocalNotRemote = sql(`
+const localNotS3 = sql(`
   SELECT * FROM local_file_view
   WHERE path LIKE $localPath || '%'
   AND contentId NOT IN (
@@ -1316,7 +1346,7 @@ const listLocalNotRemote = sql(`
   )
 `);
 
-const listRemoteNotLocal = sql(`
+const s3NotLocal = sql(`
   SELECT * FROM s3_file_view
   WHERE bucket = $s3Bucket
   AND   path LIKE $s3Path || '%'
@@ -1327,7 +1357,7 @@ const listRemoteNotLocal = sql(`
   )
 `);
 
-const listDifferences = sql(`
+const localS3Diff = sql(`
   SELECT * FROM local_and_s3_view
   WHERE localPath LIKE $localPath || '%'
   AND   s3Bucket = $s3Bucket
@@ -1336,17 +1366,17 @@ const listDifferences = sql(`
           substr(s3Path, 1 + length($s3Path))
 `);
 
-const listDuplicates = sql(`
+const duplicates = sql(`
   SELECT contentId FROM duplicates_view
 `);
 
-const findLocalContent = sql(`
+const localContent = sql(`
   SELECT * FROM local_file_view
   WHERE contentId = $contentId
   AND   path LIKE $localPath || '%'
 `);
 
-const findRemoteContent = sql(`
+const s3Content = sql(`
   SELECT * FROM s3_file_view
   WHERE contentId = $contentId
   AND   bucket = $s3Bucket
@@ -1355,16 +1385,18 @@ const findRemoteContent = sql(`
 
 async function rm (file, opts = {}) {
   file = File.fromUrl(file, { resolve: true });
+  const fns = {
+    local: remove$1,
+    s3: remove
+  };
+  const fn = fns[file.type];
+
   await file.stat();
-  if (file.isS3) {
-    await remove(file, opts);
-  } else {
-    await remove$1(file, opts);
-  }
+  await fn(file, opts);
 }
 
 const prog = sade('s3cli');
-const version = '2.1.5';
+const version = '2.1.6';
 
 prog.version(version);
 
