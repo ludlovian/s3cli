@@ -284,6 +284,21 @@ BEGIN
                 WHERE  contentId = OLD.contentId);
 END;
 
+CREATE TRIGGER IF NOT EXISTS local_file_tu
+AFTER UPDATE OF contentId ON local_file
+BEGIN
+    DELETE FROM content
+    WHERE   contentId = OLD.contentId
+    AND     NOT EXISTS (
+                SELECT contentId
+                FROM   local_file
+                WHERE  contentId = OLD.contentId)
+    AND     NOT EXISTS (
+                SELECT contentId
+                FROM   s3_file
+                WHERE  contentId = OLD.contentId);
+END;
+
 -- A file held on S3 with some content
 
 CREATE TABLE IF NOT EXISTS s3_file(
@@ -301,6 +316,21 @@ CREATE INDEX IF NOT EXISTS s3_file_i1
 
 CREATE TRIGGER IF NOT EXISTS s3_file_td
 AFTER DELETE ON s3_file
+BEGIN
+    DELETE FROM content
+    WHERE   contentId = OLD.contentId
+    AND     NOT EXISTS (
+                SELECT contentId
+                FROM   local_file
+                WHERE  contentId = OLD.contentId)
+    AND     NOT EXISTS (
+                SELECT contentId
+                FROM   s3_file
+                WHERE  contentId = OLD.contentId);
+END;
+
+CREATE TRIGGER IF NOT EXISTS s3_file_tu
+AFTER UPDATE OF contentId ON s3_file
 BEGIN
     DELETE FROM content
     WHERE   contentId = OLD.contentId
@@ -1396,7 +1426,7 @@ async function rm (file, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.1.6';
+const version = '2.1.7';
 
 prog.version(version);
 
