@@ -35,19 +35,6 @@ PRAGMA foreign_keys = ON;
 
 BEGIN TRANSACTION;
 
--- CLEANUP OLD ---------------------------------
-
-DROP TABLE IF EXISTS hash;
-DROP TRIGGER IF EXISTS local_file_td;
-DROP TRIGGER IF EXISTS s3_file_td;
-DROP TRIGGER IF EXISTS local_file_view_ti;
-DROP TRIGGER IF EXISTS s3_file_view_ti;
-DROP VIEW IF EXISTS content_use_view;
-DROP VIEW IF EXISTS local_file_view;
-DROP VIEW IF EXISTS s3_file_view;
-DROP VIEW IF EXISTS local_not_s3_view;
-DROP VIEW IF EXISTS s3_not_local_view;
-
 -- MAIN database ---------------------------------
 
 -- Version of the database schema we are using

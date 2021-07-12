@@ -49,7 +49,12 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
     for (const src of srcs) {
       const dst = src.rebase(srcRoot, dstRoot)
       if (!dsts.find(d => d.url === dst.url)) {
-        await fn.copy(src, dst, { ...opts, progress: true })
+        const cpy = dsts.find(d => !d.archived)
+        if (cpy) {
+          await fn.destCopy(cpy, dst, opts)
+        } else {
+          await fn.copy(src, dst, { ...opts, progress: true })
+        }
         destFiles.add(dst.url)
       }
     }
