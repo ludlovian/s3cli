@@ -23,6 +23,10 @@ export default class File {
       if (resolve) path = realpathSync(path)
       path = maybeAddSlash(path, directory)
       return new File({ type: 'local', path })
+    } else if (url.startsWith('gdrive://')) {
+      let path = url.slice(9)
+      path = maybeAddSlash(path, directory)
+      return new File({ type: 'gdrive', path })
     } else if (url.includes('/')) {
       return File.fromUrl('file://' + url, opts)
     }
@@ -42,6 +46,9 @@ export default class File {
       this.metadata = data.metadata
     } else if (this.type === 'local') {
       this.path = data.path
+    } else if (this.type === 'gdrive') {
+      this.path = data.path
+      this.googleId = data.googleId
     } else {
       throw new Error('Unkown type:' + data.type)
     }
@@ -77,6 +84,10 @@ export default class File {
     return this.type === 'local'
   }
 
+  get isGdrive () {
+    return this.type === 'gdrive'
+  }
+
   get hasStats () {
     return !!this.md5Hash
   }
@@ -88,8 +99,10 @@ export default class File {
   get url () {
     if (this.isS3) {
       return `s3://${this.bucket}/${this.path}`
-    } else {
+    } else if (this.isLocal) {
       return `file://${this.path}`
+    } else {
+      return `gdrive://${this.path}`
     }
   }
 
