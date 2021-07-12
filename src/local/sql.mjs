@@ -1,21 +1,16 @@
 import { sql } from '../db/index.mjs'
 
+export const listFiles = sql(`
+  SELECT path
+  FROM   local_file
+  WHERE  path like $path || '%'
+`)
+
 export const insertFile = sql(`
   INSERT INTO local_file_view
     (path, size, mtime, contentType, md5Hash)
   VALUES
     ($path, $size, $mtime, $contentType, $md5Hash)
-`)
-
-export const markFilesOld = sql(`
-  UPDATE local_file
-  SET    updated = NULL
-  WHERE  path LIKE $path || '%'
-`)
-
-export const cleanFiles = sql(`
-  DELETE FROM local_file
-  WHERE  updated IS NULL
 `)
 
 export const removeFile = sql(`

@@ -135,7 +135,8 @@ BEGIN
         (NEW.md5Hash, NEW.size, NEW.contentType)
     ON CONFLICT DO UPDATE
         SET contentType = excluded.contentType,
-            updated     = excluded.updated;
+            updated     = excluded.updated
+        WHERE contentType != excluded.contentType;
 
     INSERT INTO local_file
         (path, contentId, mtime)
@@ -149,7 +150,9 @@ BEGIN
     ON CONFLICT DO UPDATE
         SET contentId   = excluded.contentId,
             mtime       = excluded.mtime,
-            updated     = excluded.updated;
+            updated     = excluded.updated
+        WHERE contentId != excluded.contentId
+        OR    mtime     != excluded.mtime;
 END;
 
 -- S3 file
@@ -176,7 +179,8 @@ BEGIN
         (NEW.md5Hash, NEW.size, NEW.contentType)
     ON CONFLICT DO UPDATE
         SET contentType = excluded.contentType,
-            updated     = excluded.updated;
+            updated     = excluded.updated
+        WHERE contentType != excluded.contentType;
 
     INSERT INTO s3_file
         (bucket, path, contentId, mtime, storage)
@@ -193,7 +197,10 @@ BEGIN
         SET contentId   = excluded.contentId,
             mtime       = excluded.mtime,
             storage     = excluded.storage,
-            updated     = excluded.updated;
+            updated     = excluded.updated
+        WHERE contentId != excluded.contentId
+        OR    mtime     != excluded.mtime
+        OR    storage   != excluded.storage;
 END;
 
 -- On local but not on S3 --

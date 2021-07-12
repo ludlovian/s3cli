@@ -16,14 +16,14 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
   await srcRoot.scan()
   await dstRoot.scan()
 
-  const destFiles = new Set()
+  const seen = new Set()
 
   // new files
   for (const row of fn.newFiles(fn.paths)) {
     const src = File.like(srcRoot, row)
     const dst = src.rebase(srcRoot, dstRoot)
     await fn.copy(src, dst, { ...opts, progress: true })
-    destFiles.add(dst.url)
+    seen.add(dst.path)
   }
 
   // simple renames
@@ -37,7 +37,7 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
     } else {
       await fn.copy(src, dst, { ...opts, progress: true })
     }
-    destFiles.add(dst.url)
+    seen.add(dst.path)
   }
 
   // complex renames
@@ -54,7 +54,7 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
         } else {
           await fn.copy(src, dst, { ...opts, progress: true })
         }
-        destFiles.add(dst.url)
+        seen.add(dst.path)
       }
     }
 
@@ -63,7 +63,7 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
         const src = dst.rebase(dstRoot, srcRoot)
         if (!srcs.find(s => s.url === src.url)) {
           await fn.remove(dst, opts)
-          destFiles.add(dst.url)
+          seen.add(dst.path)
         }
       }
     }
@@ -73,7 +73,7 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
   if (opts.delete) {
     for (const row of fn.oldFiles(fn.paths)) {
       const dst = File.like(dstRoot, row)
-      if (!destFiles.has(dst.url)) {
+      if (!seen.has(dst.path)) {
         await fn.remove(dst, opts)
       }
     }
