@@ -118,7 +118,10 @@ export default class File {
     let total
     log.status('Scanning %s ... ', this.url)
 
-    const scanner = this.isLocal ? localScan : s3scan
+    const scanner = {
+      local: localScan,
+      s3: s3scan
+    }[this.type]
 
     for await (const count of scanner(this)) {
       log.status('Scanning %s ... %d', this.url, count)

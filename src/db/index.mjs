@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS local_file(
     updated     TEXT DEFAULT (datetime('now'))
 );
 
+CREATE INDEX IF NOT EXISTS local_file_i1
+  ON local_file (contentId);
+
 CREATE TRIGGER IF NOT EXISTS local_file_td
 AFTER DELETE ON local_file
 BEGIN
@@ -89,6 +92,9 @@ CREATE TABLE IF NOT EXISTS s3_file(
     updated     TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (bucket, path)
 );
+
+CREATE INDEX IF NOT EXISTS s3_file_i1
+  ON s3_file (contentId);
 
 CREATE TRIGGER IF NOT EXISTS s3_file_td
 AFTER DELETE ON s3_file

@@ -1,3 +1,12 @@
+export function getDirection (src, dst) {
+  const validDirections = new Set(['local_s3', 's3_local'])
+  const dir = src.type + '_' + dst.type
+  if (!validDirections.has(dir)) {
+    throw new Error(`Cannot do ${src.type} -> ${dst.type}`)
+  }
+  return dir
+}
+
 export function isUploading (src, dst) {
   if (src.isLocal && dst.isS3) return true
   if (src.isS3 && dst.isLocal) return false

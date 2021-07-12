@@ -1,17 +1,16 @@
 import { sql } from './db/index.mjs'
 import File from './lib/file.mjs'
-import { isUploading } from './util.mjs'
+import { getDirection } from './util.mjs'
 import localCopy from './local/copy.mjs'
 import localRemove from './local/remove.mjs'
-import upload from './s3/upload.mjs'
-import download from './s3/download.mjs'
+import s3upload from './s3/upload.mjs'
+import s3download from './s3/download.mjs'
 import s3copy from './s3/copy.mjs'
 import s3remove from './s3/remove.mjs'
 
 export default async function sync (srcRoot, dstRoot, opts = {}) {
   srcRoot = File.fromUrl(srcRoot, { resolve: true, directory: true })
   dstRoot = File.fromUrl(dstRoot, { resolve: true, directory: true })
-  isUploading(srcRoot, dstRoot)
   const fn = getFunctions(srcRoot, dstRoot)
 
   await srcRoot.scan()
@@ -81,44 +80,42 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
   }
 }
 
-function getFunctions (srcRoot, dstRoot) {
+function getFunctions (src, dst) {
+  const dir = getDirection(src, dst)
   const paths = {
-    localPath:
-      (srcRoot.isLocal && srcRoot.path) || (dstRoot.isLocal && dstRoot.path),
-    s3Bucket:
-      (srcRoot.isS3 && srcRoot.bucket) || (dstRoot.isS3 && dstRoot.bucket),
-    s3Path: (srcRoot.isS3 && srcRoot.path) || (dstRoot.isS3 && dstRoot.path)
+    localPath: (src.isLocal && src.path) || (dst.isLocal && dst.path),
+    s3Bucket: (src.isS3 && src.bucket) || (dst.isS3 && dst.bucket),
+    s3Path: (src.isS3 && src.path) || (dst.isS3 && dst.path)
   }
-  if (srcRoot.isLocal) {
-    return {
+  return {
+    local_s3: {
       paths,
-      newFiles: listLocalNotRemote.all,
-      oldFiles: listRemoteNotLocal.all,
-      differences: listDifferences.all,
-      duplicates: listDuplicates.all,
-      srcContent: findLocalContent,
-      dstContent: findRemoteContent,
-      copy: upload,
+      newFiles: localNotS3.all,
+      oldFiles: s3NotLocal.all,
+      differences: localS3Diff.all,
+      duplicates: duplicates.all,
+      srcContent: localContent,
+      dstContent: s3Content,
+      copy: s3upload,
       destCopy: s3copy,
       remove: s3remove
-    }
-  } else {
-    return {
+    },
+    s3_local: {
       paths,
-      newFiles: listRemoteNotLocal.all,
-      oldFiles: listLocalNotRemote.all,
-      differences: listDifferences.all,
-      duplicates: listDuplicates.all,
-      srcContent: findRemoteContent,
-      dstContent: findLocalContent,
-      copy: download,
+      newFiles: s3NotLocal.all,
+      oldFiles: localNotS3.all,
+      differences: localS3Diff.all,
+      duplicates: duplicates.all,
+      srcContent: s3Content,
+      dstContent: localContent,
+      copy: s3download,
       destCopy: localCopy,
       remove: localRemove
     }
-  }
+  }[dir]
 }
 
-const listLocalNotRemote = sql(`
+const localNotS3 = sql(`
   SELECT * FROM local_file_view
   WHERE path LIKE $localPath || '%'
   AND contentId NOT IN (
@@ -129,7 +126,7 @@ const listLocalNotRemote = sql(`
   )
 `)
 
-const listRemoteNotLocal = sql(`
+const s3NotLocal = sql(`
   SELECT * FROM s3_file_view
   WHERE bucket = $s3Bucket
   AND   path LIKE $s3Path || '%'
@@ -140,7 +137,7 @@ const listRemoteNotLocal = sql(`
   )
 `)
 
-const listDifferences = sql(`
+const localS3Diff = sql(`
   SELECT * FROM local_and_s3_view
   WHERE localPath LIKE $localPath || '%'
   AND   s3Bucket = $s3Bucket
@@ -149,17 +146,17 @@ const listDifferences = sql(`
           substr(s3Path, 1 + length($s3Path))
 `)
 
-const listDuplicates = sql(`
+const duplicates = sql(`
   SELECT contentId FROM duplicates_view
 `)
 
-const findLocalContent = sql(`
+const localContent = sql(`
   SELECT * FROM local_file_view
   WHERE contentId = $contentId
   AND   path LIKE $localPath || '%'
 `)
 
-const findRemoteContent = sql(`
+const s3Content = sql(`
   SELECT * FROM s3_file_view
   WHERE contentId = $contentId
   AND   bucket = $s3Bucket

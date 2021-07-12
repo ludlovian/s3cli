@@ -8,13 +8,17 @@ export default async function ls (url, opts) {
   const { long, rescan, human, total } = opts
   url = File.fromUrl(url, { resolve: true })
 
+  const list = {
+    local: localList.all,
+    s3: s3List.all
+  }[url.type]
+
   if (rescan) await url.scan()
 
   let nTotalCount = 0
   let nTotalSize = 0
 
-  const sql = url.isLocal ? listLocalFiles : listS3files
-  for (const row of sql.all(url)) {
+  for (const row of list(url)) {
     const { path, mtime, size, storage } = row
     nTotalCount++
     nTotalSize += size
@@ -41,14 +45,14 @@ const STORAGE = {
   DEEP_ARCHIVE: 'D'
 }
 
-const listLocalFiles = sql(`
+const localList = sql(`
   SELECT *
   FROM local_file_view
   WHERE path LIKE $path || '%'
   ORDER BY path
 `)
 
-const listS3files = sql(`
+const s3List = sql(`
   SELECT *
   FROM s3_file_view
   WHERE bucket = $bucket
