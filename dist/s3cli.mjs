@@ -238,19 +238,6 @@ PRAGMA foreign_keys = ON;
 
 BEGIN TRANSACTION;
 
--- CLEANUP OLD ---------------------------------
-
-DROP TABLE IF EXISTS hash;
-DROP TRIGGER IF EXISTS local_file_td;
-DROP TRIGGER IF EXISTS s3_file_td;
-DROP TRIGGER IF EXISTS local_file_view_ti;
-DROP TRIGGER IF EXISTS s3_file_view_ti;
-DROP VIEW IF EXISTS content_use_view;
-DROP VIEW IF EXISTS local_file_view;
-DROP VIEW IF EXISTS s3_file_view;
-DROP VIEW IF EXISTS local_not_s3_view;
-DROP VIEW IF EXISTS s3_not_local_view;
-
 -- MAIN database ---------------------------------
 
 -- Version of the database schema we are using
@@ -1249,7 +1236,12 @@ async function sync (srcRoot, dstRoot, opts = {}) {
     for (const src of srcs) {
       const dst = src.rebase(srcRoot, dstRoot);
       if (!dsts.find(d => d.url === dst.url)) {
-        await fn.copy(src, dst, { ...opts, progress: true });
+        const cpy = dsts.find(d => !d.archived);
+        if (cpy) {
+          await fn.destCopy(cpy, dst, opts);
+        } else {
+          await fn.copy(src, dst, { ...opts, progress: true });
+        }
         destFiles.add(dst.url);
       }
     }
@@ -1372,7 +1364,7 @@ async function rm (file, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.1.4';
+const version = '2.1.5';
 
 prog.version(version);
 
