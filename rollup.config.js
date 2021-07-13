@@ -7,6 +7,7 @@ export default {
     'fs/promises',
     'stream/promises',
     'aws-sdk',
+    '@googleapis/drive',
     'better-sqlite3',
     'mime',
     'sade'
