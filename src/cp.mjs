@@ -3,6 +3,7 @@ import log from 'logjs'
 import File from './lib/file.mjs'
 import s3upload from './s3/upload.mjs'
 import s3download from './s3/download.mjs'
+import gdriveDownload from './drive/download.mjs'
 import { getDirection } from './util.mjs'
 
 export default async function cp (src, dst, opts = {}) {
@@ -11,7 +12,8 @@ export default async function cp (src, dst, opts = {}) {
   const dir = getDirection(src, dst)
   const fns = {
     local_s3: s3upload,
-    s3_local: s3download
+    s3_local: s3download,
+    gdrive_local: gdriveDownload
   }
   const fn = fns[dir]
 

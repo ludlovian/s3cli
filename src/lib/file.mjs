@@ -6,9 +6,11 @@ import log from 'logjs'
 
 import localScan from '../local/scan.mjs'
 import localStat from '../local/stat.mjs'
+import { parse as s3parse } from '../s3/util.mjs'
 import s3scan from '../s3/scan.mjs'
 import s3Stat from '../s3/stat.mjs'
-import { parse as s3parse } from '../s3/util.mjs'
+import gdriveScan from '../drive/scan.mjs'
+import gdriveStat from '../drive/stat.mjs'
 
 export default class File {
   static fromUrl (url, opts = {}) {
@@ -108,11 +110,13 @@ export default class File {
 
   async stat () {
     if (this.hasStats) return
-    if (this.isS3) {
-      await s3Stat(this)
-    } else {
-      await localStat(this)
-    }
+    const fn = {
+      s3: s3Stat,
+      local: localStat,
+      gdrive: gdriveStat
+    }[this.type]
+
+    if (fn) await fn(this)
   }
 
   rebase (from, to) {
@@ -133,7 +137,8 @@ export default class File {
 
     const scanner = {
       local: localScan,
-      s3: s3scan
+      s3: s3scan,
+      gdrive: gdriveScan
     }[this.type]
 
     for await (const count of scanner(this)) {

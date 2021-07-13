@@ -7,6 +7,7 @@ import s3upload from './s3/upload.mjs'
 import s3download from './s3/download.mjs'
 import s3copy from './s3/copy.mjs'
 import s3remove from './s3/remove.mjs'
+import gdriveDownload from './drive/download.mjs'
 
 export default async function sync (srcRoot, dstRoot, opts = {}) {
   srcRoot = File.fromUrl(srcRoot, { resolve: true, directory: true })
@@ -85,7 +86,8 @@ function getFunctions (src, dst) {
   const paths = {
     localPath: (src.isLocal && src.path) || (dst.isLocal && dst.path),
     s3Bucket: (src.isS3 && src.bucket) || (dst.isS3 && dst.bucket),
-    s3Path: (src.isS3 && src.path) || (dst.isS3 && dst.path)
+    s3Path: (src.isS3 && src.path) || (dst.isS3 && dst.path),
+    gdrivePath: (src.isGdrive && src.path) || (dst.isGdrive && dst.path)
   }
   return {
     local_s3: {
@@ -109,6 +111,18 @@ function getFunctions (src, dst) {
       srcContent: s3Content,
       dstContent: localContent,
       copy: s3download,
+      destCopy: localCopy,
+      remove: localRemove
+    },
+    gdrive_local: {
+      paths,
+      newFiles: gdriveNotLocal.all,
+      oldFiles: localNotGdrive.all,
+      differences: localGdriveDiff.all,
+      duplicates: duplicates.all,
+      srcContent: gdriveContent,
+      dstContent: localContent,
+      copy: gdriveDownload,
       destCopy: localCopy,
       remove: localRemove
     }
@@ -137,6 +151,26 @@ const s3NotLocal = sql(`
   )
 `)
 
+const localNotGdrive = sql(`
+  SELECT * FROM local_file_view
+  WHERE path LIKE $localPath || '%'
+  AND contentId NOT IN (
+    SELECT contentId
+    FROM gdrive_file
+    WHERE path LIKE $gdrivePath || '%'
+  )
+`)
+
+const gdriveNotLocal = sql(`
+  SELECT * FROM gdrive_file_view
+  WHERE path LIKE $gdrivePath || '%'
+  AND contentId NOT IN (
+    SELECT contentId
+    FROM local_file
+    WHERE path LIKE $localPath || '%'
+  )
+`)
+
 const localS3Diff = sql(`
   SELECT * FROM local_and_s3_view
   WHERE localPath LIKE $localPath || '%'
@@ -144,6 +178,14 @@ const localS3Diff = sql(`
   AND   s3Path LIKE $s3Path || '%'
   AND   substr(localPath, 1 + length($localPath)) !=
           substr(s3Path, 1 + length($s3Path))
+`)
+
+const localGdriveDiff = sql(`
+  SELECT * FROM local_and_gdrive_view
+  WHERE localPath LIKE $localPath || '%'
+  AND   gdrivePath LIKE $gdrivePath || '%'
+  AND   substr(localPath, 1 + length($localPath)) !=
+          substr(gdrivePath, 1 + length($gdrivePath))
 `)
 
 const duplicates = sql(`
@@ -161,4 +203,10 @@ const s3Content = sql(`
   WHERE contentId = $contentId
   AND   bucket = $s3Bucket
   AND   path LIKE $s3Path || '%'
+`)
+
+const gdriveContent = sql(`
+  SELECT * FROM gdrive_file_view
+  WHERE contentId = $contentId
+  AND   path LIKE $gdrivePath || '%'
 `)

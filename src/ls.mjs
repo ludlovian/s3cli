@@ -10,7 +10,8 @@ export default async function ls (url, opts) {
 
   const list = {
     local: localList.all,
-    s3: s3List.all
+    s3: s3List.all,
+    gdrive: gdriveList.all
   }[url.type]
 
   if (rescan) await url.scan()
@@ -58,4 +59,11 @@ const s3List = sql(`
   WHERE bucket = $bucket
   AND   path LIKE $path || '%'
   ORDER BY bucket, path
+`)
+
+const gdriveList = sql(`
+  SELECT *
+  FROM gdrive_file_view
+  WHERE path LIKE $path || '%'
+  ORDER BY path
 `)

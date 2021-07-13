@@ -1,5 +1,5 @@
 export function getDirection (src, dst) {
-  const validDirections = new Set(['local_s3', 's3_local'])
+  const validDirections = new Set(['local_s3', 's3_local', 'gdrive_local'])
   const dir = src.type + '_' + dst.type
   if (!validDirections.has(dir)) {
     throw new Error(`Cannot do ${src.type} -> ${dst.type}`)

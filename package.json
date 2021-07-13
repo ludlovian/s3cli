@@ -21,6 +21,7 @@
   },
   "homepage": "https://github.com/ludlovian/s3cli#readme",
   "dependencies": {
+    "@googleapis/drive": "^0.3.1",
     "aws-sdk": "^2.918.0",
     "better-sqlite3": "^7.4.1",
     "mime": "^2.5.2",

@@ -345,43 +345,6 @@ END;
 
 -- Sync helping views -------------------------------
 
--- On local but not on S3 --
-
-CREATE VIEW IF NOT EXISTS local_not_s3_view AS
-SELECT *
-FROM   local_file_view
-WHERE  contentId NOT IN (
-  SELECT contentId
-  FROM   s3_file);
-
--- On S3 but not on local --
-
-CREATE VIEW IF NOT EXISTS s3_not_local_view AS
-SELECT *
-FROM   s3_file_view
-WHERE  contentId NOT IN (
-  SELECT contentId
-  FROM   local_file);
-
--- On local but not on gdrive --
-
-CREATE VIEW IF NOT EXISTS local_not_gdrive_view AS
-SELECT *
-FROM   local_file_view
-WHERE  contentId NOT IN (
-  SELECT contentId
-  FROM   gdrive_file);
-
--- On gdrive but not on local --
-
-CREATE VIEW IF NOT EXISTS gdrive_not_local_view AS
-SELECT *
-FROM   gdrive_file_view
-WHERE  contentId NOT IN (
-  SELECT contentId
-  FROM   local_file);
-
-
 -- On both local and S3 once
 
 CREATE VIEW IF NOT EXISTS local_and_s3_view AS

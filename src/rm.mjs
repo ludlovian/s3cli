@@ -10,6 +10,8 @@ export default async function rm (file, opts = {}) {
   }
   const fn = fns[file.type]
 
+  if (!fn) throw new Error('Cannot rm ' + file.url)
+
   await file.stat()
   await fn(file, opts)
 }
