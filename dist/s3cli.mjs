@@ -266,39 +266,6 @@ CREATE TABLE IF NOT EXISTS local_file(
     updated     TEXT DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS local_file_i1
-  ON local_file (contentId);
-
-CREATE TRIGGER IF NOT EXISTS local_file_td
-AFTER DELETE ON local_file
-BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND     NOT EXISTS (
-                SELECT contentId
-                FROM   local_file
-                WHERE  contentId = OLD.contentId)
-    AND     NOT EXISTS (
-                SELECT contentId
-                FROM   s3_file
-                WHERE  contentId = OLD.contentId);
-END;
-
-CREATE TRIGGER IF NOT EXISTS local_file_tu
-AFTER UPDATE OF contentId ON local_file
-BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND     NOT EXISTS (
-                SELECT contentId
-                FROM   local_file
-                WHERE  contentId = OLD.contentId)
-    AND     NOT EXISTS (
-                SELECT contentId
-                FROM   s3_file
-                WHERE  contentId = OLD.contentId);
-END;
-
 -- A file held on S3 with some content
 
 CREATE TABLE IF NOT EXISTS s3_file(
@@ -311,22 +278,78 @@ CREATE TABLE IF NOT EXISTS s3_file(
     PRIMARY KEY (bucket, path)
 );
 
+-- A file on gdrive containing some content
+
+CREATE TABLE IF NOT EXISTS gdrive_file(
+    path        TEXT NOT NULL PRIMARY KEY,
+    contentId   INTEGER NOT NULL REFERENCES content(contentId),
+    googleId    TEXT NOT NULL,
+    mtime       TEXT NOT NULL,
+    updated     TEXT DEFAULT (datetime('now'))
+);
+
+-- Indexes ------------------------------------------
+
+CREATE INDEX IF NOT EXISTS local_file_i1
+  ON local_file (contentId);
+
 CREATE INDEX IF NOT EXISTS s3_file_i1
   ON s3_file (contentId);
+
+CREATE INDEX IF NOT EXISTS gdrive_file_i1
+  ON gdrive_file (contentId);
+
+-- Triggers on Tables ------------------------------
+
+-- Content is deleted once orphaned
+-- Check performed after updates and deletes of files tables
+
+CREATE TRIGGER IF NOT EXISTS local_file_td
+AFTER DELETE ON local_file
+BEGIN
+    DELETE FROM content
+    WHERE   contentId = OLD.contentId
+    AND NOT EXISTS (
+        SELECT contentId FROM local_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM s3_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM gdrive_file
+        WHERE  contentId = OLD.contentId);
+END;
+
+CREATE TRIGGER IF NOT EXISTS local_file_tu
+AFTER UPDATE OF contentId ON local_file
+BEGIN
+    DELETE FROM content
+    WHERE   contentId = OLD.contentId
+    AND NOT EXISTS (
+        SELECT contentId FROM local_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM s3_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM gdrive_file
+        WHERE  contentId = OLD.contentId);
+END;
 
 CREATE TRIGGER IF NOT EXISTS s3_file_td
 AFTER DELETE ON s3_file
 BEGIN
     DELETE FROM content
     WHERE   contentId = OLD.contentId
-    AND     NOT EXISTS (
-                SELECT contentId
-                FROM   local_file
-                WHERE  contentId = OLD.contentId)
-    AND     NOT EXISTS (
-                SELECT contentId
-                FROM   s3_file
-                WHERE  contentId = OLD.contentId);
+    AND NOT EXISTS (
+        SELECT contentId FROM local_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM s3_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM gdrive_file
+        WHERE  contentId = OLD.contentId);
 END;
 
 CREATE TRIGGER IF NOT EXISTS s3_file_tu
@@ -334,17 +357,50 @@ AFTER UPDATE OF contentId ON s3_file
 BEGIN
     DELETE FROM content
     WHERE   contentId = OLD.contentId
-    AND     NOT EXISTS (
-                SELECT contentId
-                FROM   local_file
-                WHERE  contentId = OLD.contentId)
-    AND     NOT EXISTS (
-                SELECT contentId
-                FROM   s3_file
-                WHERE  contentId = OLD.contentId);
+    AND NOT EXISTS (
+        SELECT contentId FROM local_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM s3_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM gdrive_file
+        WHERE  contentId = OLD.contentId);
 END;
 
--- VIEWS ----------------------------------------
+CREATE TRIGGER IF NOT EXISTS gdrive_file_td
+AFTER DELETE ON gdrive_file
+BEGIN
+    DELETE FROM content
+    WHERE   contentId = OLD.contentId
+    AND NOT EXISTS (
+        SELECT contentId FROM local_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM s3_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM gdrive_file
+        WHERE  contentId = OLD.contentId);
+END;
+
+CREATE TRIGGER IF NOT EXISTS gdrive_file_tu
+AFTER UPDATE OF contentId ON gdrive_file
+BEGIN
+    DELETE FROM content
+    WHERE   contentId = OLD.contentId
+    AND NOT EXISTS (
+        SELECT contentId FROM local_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM s3_file
+        WHERE  contentId = OLD.contentId)
+    AND NOT EXISTS (
+        SELECT contentId FROM gdrive_file
+        WHERE  contentId = OLD.contentId);
+END;
+
+-- Main views of files --------------------------
 
 -- locally held file
 
@@ -358,6 +414,39 @@ SELECT  f.path          AS path,
 FROM    local_file f
 JOIN    content c USING (contentId)
 ORDER BY f.path;
+
+-- S3 file
+
+CREATE VIEW IF NOT EXISTS s3_file_view AS
+SELECT  f.bucket        AS bucket,
+        f.path          AS path,
+        c.size          AS size,
+        f.mtime         AS mtime,
+        f.storage       AS storage,
+        c.contentType   AS contentType,
+        c.md5Hash       AS md5Hash,
+        f.contentId     AS contentId
+FROM    s3_file f
+JOIN    content c USING (contentId)
+ORDER BY f.bucket, f.path;
+
+-- gdrive file
+
+CREATE VIEW IF NOT EXISTS gdrive_file_view AS
+SELECT  f.path          AS path,
+        f.googleId      AS googleId,
+        c.size          AS size,
+        f.mtime         AS mtime,
+        c.contentType   AS contentType,
+        c.md5Hash       AS md5Hash,
+        f.contentId     AS contentId
+FROM    gdrive_file f
+JOIN    content c USING (contentId)
+ORDER BY f.path;
+
+-- view inserts ---------------------------------
+
+-- local file
 
 CREATE TRIGGER IF NOT EXISTS local_file_view_ti
 INSTEAD OF INSERT ON local_file_view
@@ -388,20 +477,7 @@ BEGIN
         OR    mtime     != excluded.mtime;
 END;
 
--- S3 file
-
-CREATE VIEW IF NOT EXISTS s3_file_view AS
-SELECT  f.bucket        AS bucket,
-        f.path          AS path,
-        c.size          AS size,
-        f.mtime         AS mtime,
-        f.storage       AS storage,
-        c.contentType   AS contentType,
-        c.md5Hash       AS md5Hash,
-        f.contentId     AS contentId
-FROM    s3_file f
-JOIN    content c USING (contentId)
-ORDER BY f.bucket, f.path;
+-- s3 file
 
 CREATE TRIGGER IF NOT EXISTS s3_file_view_ti
 INSTEAD OF INSERT ON s3_file_view
@@ -436,25 +512,43 @@ BEGIN
         OR    storage   != excluded.storage;
 END;
 
--- On local but not on S3 --
+-- gdrive file
 
-CREATE VIEW IF NOT EXISTS local_not_s3_view AS
-SELECT *
-FROM   local_file_view
-WHERE  contentId NOT IN (
-  SELECT contentId
-  FROM   s3_file);
+CREATE TRIGGER IF NOT EXISTS gdrive_file_view_ti
+INSTEAD OF INSERT ON gdrive_file_view
+BEGIN
+    INSERT INTO content
+        (md5Hash, size, contentType)
+    VALUES
+        (NEW.md5Hash, NEW.size, NEW.contentType)
+    ON CONFLICT DO UPDATE
+        SET contentType = excluded.contentType,
+            updated     = excluded.updated
+        WHERE contentType != excluded.contentType;
 
--- On S3 but not on local --
+    INSERT INTO gdrive_file
+        (path, contentId, mtime, googleId)
+    SELECT  NEW.path,
+            contentId,
+            datetime(NEW.mtime),
+            NEW.googleId
+    FROM    content
+    WHERE   md5Hash = NEW.md5Hash
+    AND     size    = NEW.size
 
-CREATE VIEW IF NOT EXISTS s3_not_local_view AS
-SELECT *
-FROM   s3_file_view
-WHERE  contentId NOT IN (
-  SELECT contentId
-  FROM   local_file);
+    ON CONFLICT DO UPDATE
+        SET contentId   = excluded.contentId,
+            mtime       = excluded.mtime,
+            googleId    = excluded.googleId,
+            updated     = excluded.updated
+        WHERE contentId != excluded.contentId
+        OR    mtime     != excluded.mtime
+        OR    googleId  != excluded.googleId;
+END;
 
--- On local and S3
+-- Sync helping views -------------------------------
+
+-- On both local and S3 once
 
 CREATE VIEW IF NOT EXISTS local_and_s3_view AS
 SELECT l.path       AS localPath,
@@ -466,6 +560,18 @@ JOIN   s3_file s USING (contentId)
 GROUP BY contentId
 HAVING count(l.path) = 1
 AND    count(s.path) = 1;
+
+-- On both local and gdrive once
+
+CREATE VIEW IF NOT EXISTS local_and_gdrive_view AS
+SELECT l.path       AS localPath,
+       g.path       AS gdrivePath,
+       l.contentId  as contentId
+FROM   local_file l
+JOIN   gdrive_file g USING (contentId)
+GROUP BY contentId
+HAVING count(l.path) = 1
+AND    count(g.path) = 1;
 
 -- Multiple copies exist somewhere
 
@@ -480,25 +586,32 @@ UNION
 SELECT  contentId AS contentId
 FROM    s3_file
 GROUP BY contentId
+HAVING count(contentId) > 1
+
+UNION
+
+SELECT  contentId AS contentId
+FROM    gdrive_file
+GROUP BY contentId
 HAVING count(contentId) > 1;
 
 COMMIT;
 `);
 
-const listFiles$1 = sql(`
+const listFiles$2 = sql(`
   SELECT path
   FROM   local_file
   WHERE  path like $path || '%'
 `);
 
-const insertFile$1 = sql(`
+const insertFile$2 = sql(`
   INSERT INTO local_file_view
     (path, size, mtime, contentType, md5Hash)
   VALUES
     ($path, $size, $mtime, $contentType, $md5Hash)
 `);
 
-const removeFile$1 = sql(`
+const removeFile$2 = sql(`
   DELETE FROM local_file
   WHERE path = $path
 `);
@@ -511,21 +624,21 @@ const findHash = sql(`
   AND    mtime = datetime($mtime)
 `).pluck().get;
 
-async function * scan$1 (root) {
+async function * scan$2 (root) {
   const File = root.constructor;
 
   let n = 0;
-  const old = new Set(listFiles$1.pluck().all(root));
+  const old = new Set(listFiles$2.pluck().all(root));
 
   const insertFiles = sql.transaction(files => {
     for (const file of files) {
-      insertFile$1(file);
+      insertFile$2(file);
       old.delete(file.path);
     }
   });
   const deleteOld = sql.transaction(paths => {
     for (const path of paths) {
-      removeFile$1({ path });
+      removeFile$2({ path });
     }
   });
 
@@ -563,7 +676,7 @@ async function hashFile (filename, { algo = 'md5', enc = 'hex' } = {}) {
   return hasher.digest(enc)
 }
 
-async function stat$1 (file) {
+async function stat$2 (file) {
   const stats = await lstat(file.path);
   file.size = stats.size;
   file.mtime = stats.mtime;
@@ -571,12 +684,12 @@ async function stat$1 (file) {
   if (!file.md5Hash) {
     log.status('%s ... hashing', file.path);
     file.md5Hash = await hashFile(file.path);
-    insertFile$1(file);
+    insertFile$2(file);
   }
 }
 
 function getDirection (src, dst) {
-  const validDirections = new Set(['local_s3', 's3_local']);
+  const validDirections = new Set(['local_s3', 's3_local', 'gdrive_local']);
   const dir = src.type + '_' + dst.type;
   if (!validDirections.has(dir)) {
     throw new Error(`Cannot do ${src.type} -> ${dst.type}`)
@@ -642,36 +755,36 @@ function onProgress ({ speedo }) {
   }
 }
 
-const insertFile = sql(`
+const insertFile$1 = sql(`
   INSERT INTO s3_file_view
     (bucket, path, size, mtime, storage, contentType, md5Hash)
   VALUES
     ($bucket, $path, $size, $mtime, $storage, $contentType, $md5Hash)
 `);
 
-const listFiles = sql(`
+const listFiles$1 = sql(`
   SELECT  bucket, path
   FROM    s3_file
   WHERE   bucket = $bucket
   AND     path LIKE $path || '%'
 `);
 
-const removeFile = sql(`
+const removeFile$1 = sql(`
   DELETE FROM s3_file
   WHERE bucket = $bucket
   AND   path = $path
 `);
 
-async function * scan (root) {
+async function * scan$1 (root) {
   const File = root.constructor;
   let n = 0;
   const s3 = getS3();
 
-  const old = new Set(listFiles.all(root).map(r => r.path));
+  const old = new Set(listFiles$1.all(root).map(r => r.path));
 
   const insertFiles = sql.transaction(files => {
     for (const file of files) {
-      insertFile(file);
+      insertFile$1(file);
       old.delete(file.path);
     }
   });
@@ -679,7 +792,7 @@ async function * scan (root) {
   const deleteOld = sql.transaction(paths => {
     const { bucket } = root;
     for (const path of paths) {
-      removeFile({ bucket, path });
+      removeFile$1({ bucket, path });
     }
   });
 
@@ -713,7 +826,7 @@ async function * scan (root) {
 
 const MD_KEY = 's3cmd-attrs';
 
-async function stat (file) {
+async function stat$1 (file) {
   const s3 = getS3();
   const req = { Bucket: file.bucket, Key: file.path };
   const item = await s3.headObject(req).promise();
@@ -745,6 +858,144 @@ function unpack (s) {
   )
 }
 
+const getDriveAPI = once(async function getDriveAPI () {
+  const scopes = ['https://www.googleapis.com/auth/drive'];
+  const { default: driveApi } = await import('@googleapis/drive');
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = 'credentials.json';
+  const auth = new driveApi.auth.GoogleAuth({ scopes });
+  const authClient = await auth.getClient();
+  return driveApi.drive({ version: 'v3', auth: authClient })
+});
+
+const insertFile = sql(`
+  INSERT INTO gdrive_file_view
+    (path, size, mtime, googleId, contentType, md5Hash)
+  VALUES
+    ($path, $size, $mtime, $googleId, $contentType, $md5Hash)
+`);
+
+const listFiles = sql(`
+  SELECT  path
+  FROM    gdrive_file
+  WHERE   path LIKE $path || '%'
+`);
+
+const removeFile = sql(`
+  DELETE FROM gdrive_file
+  WHERE path = $path
+`);
+
+async function * scan (root) {
+  const File = root.constructor;
+  const drive = await getDriveAPI();
+
+  let n = 0;
+  const old = new Set(listFiles.all(root).map(r => r.path));
+  const insertFiles = sql.transaction(files => {
+    for (const file of files) {
+      insertFile(file);
+      old.delete(file.path);
+    }
+  });
+  const deleteOld = sql.transaction(paths => {
+    for (const path of paths) {
+      removeFile({ path });
+    }
+  });
+
+  const query = {
+    fields:
+      'nextPageToken,files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)'
+  };
+
+  const files = new Set();
+  let pResponse = drive.files.list(query);
+  while (pResponse) {
+    const response = await pResponse;
+    const { status, data } = response;
+    if (status !== 200) {
+      const err = new Error('Bad response from Drive');
+      err.response = response;
+      throw err
+    }
+
+    data.files.forEach(row => files.add(new Item(row)));
+    // which are ready with their path worked out
+    const ready = [...files].filter(f => {
+      if (f.findPath() == null) return false
+      files.delete(f);
+      return true
+    });
+    // which are actually files under the root
+    const found = ready
+      .filter(f => !f.isFolder && f.path.startsWith(root.path))
+      .map(f => File.like(root, f));
+
+    insertFiles(found);
+    n += found.length;
+    if (found.length) yield n;
+
+    if (!data.nextPageToken) break
+    query.pageToken = data.nextPageToken;
+    pResponse = drive.files.list(query);
+  }
+
+  deleteOld([...old]);
+}
+
+const folders = {};
+class Item {
+  constructor (entry) {
+    this.googleId = entry.id;
+    this.name = entry.name;
+    this.contentType = entry.mimeType;
+    if (entry.parents) this.parent = entry.parents[0];
+    if (!this.isFolder) {
+      this.mtime = new Date(entry.modifiedTime);
+      this.size = Number(entry.size);
+      this.md5Hash = entry.md5Checksum;
+    } else {
+      folders[this.googleId] = this;
+    }
+  }
+
+  get isFolder () {
+    return this.contentType.endsWith('folder')
+  }
+
+  findPath () {
+    if (!this.path) this.path = calcPath(this);
+    return this.path
+  }
+}
+
+function calcPath (f) {
+  if (!f.parent) return '/' + f.name
+  const parent = folders[f.parent];
+  if (!parent) return undefined
+  const pp = calcPath(parent);
+  if (pp == null) return undefined
+  return pp + '/' + f.name
+}
+
+async function stat (file) {
+  const row = getDetails.get(file);
+  if (!row) {
+    throw new Error('Not found: ' + file.url)
+  }
+  file.googleId = row.googleId;
+  file.mtime = new Date(row.mtime + 'Z');
+  file.size = row.size;
+  file.contentType = row.contentType;
+  file.md5Hash = row.md5Hash;
+}
+
+const getDetails = sql(`
+  SELECT *
+  FROM gdrive_file_view
+  WHERE path = $path
+`);
+
 class File {
   static fromUrl (url, opts = {}) {
     const { directory, resolve } = opts;
@@ -758,6 +1009,10 @@ class File {
       if (resolve) path = realpathSync(path);
       path = maybeAddSlash(path, directory);
       return new File({ type: 'local', path })
+    } else if (url.startsWith('gdrive://')) {
+      let path = url.slice(9);
+      path = maybeAddSlash(path, directory);
+      return new File({ type: 'gdrive', path })
     } else if (url.includes('/')) {
       return File.fromUrl('file://' + url, opts)
     }
@@ -777,6 +1032,9 @@ class File {
       this.metadata = data.metadata;
     } else if (this.type === 'local') {
       this.path = data.path;
+    } else if (this.type === 'gdrive') {
+      this.path = data.path;
+      this.googleId = data.googleId;
     } else {
       throw new Error('Unkown type:' + data.type)
     }
@@ -812,6 +1070,10 @@ class File {
     return this.type === 'local'
   }
 
+  get isGdrive () {
+    return this.type === 'gdrive'
+  }
+
   get hasStats () {
     return !!this.md5Hash
   }
@@ -823,18 +1085,22 @@ class File {
   get url () {
     if (this.isS3) {
       return `s3://${this.bucket}/${this.path}`
-    } else {
+    } else if (this.isLocal) {
       return `file://${this.path}`
+    } else {
+      return `gdrive://${this.path}`
     }
   }
 
   async stat () {
     if (this.hasStats) return
-    if (this.isS3) {
-      await stat(this);
-    } else {
-      await stat$1(this);
-    }
+    const fn = {
+      s3: stat$1,
+      local: stat$2,
+      gdrive: stat
+    }[this.type];
+
+    if (fn) await fn(this);
   }
 
   rebase (from, to) {
@@ -854,8 +1120,9 @@ class File {
     log.status('Scanning %s ... ', this.url);
 
     const scanner = {
-      local: scan$1,
-      s3: scan
+      local: scan$2,
+      s3: scan$1,
+      gdrive: scan
     }[this.type];
 
     for await (const count of scanner(this)) {
@@ -882,7 +1149,8 @@ async function ls (url, opts) {
 
   const list = {
     local: localList.all,
-    s3: s3List.all
+    s3: s3List.all,
+    gdrive: gdriveList.all
   }[url.type];
 
   if (rescan) await url.scan();
@@ -930,6 +1198,13 @@ const s3List = sql(`
   WHERE bucket = $bucket
   AND   path LIKE $path || '%'
   ORDER BY bucket, path
+`);
+
+const gdriveList = sql(`
+  SELECT *
+  FROM gdrive_file_view
+  WHERE path LIKE $path || '%'
+  ORDER BY path
 `);
 
 function speedo ({
@@ -1093,7 +1368,7 @@ async function upload (source, dest, opts) {
 
   dest.md5Hash = undefined; // force re-stat
   await dest.stat();
-  insertFile(dest);
+  insertFile$1(dest);
 }
 
 function makeMetadata ({ mtime, size, md5Hash, contentType }) {
@@ -1121,7 +1396,7 @@ function hashStream ({ algo = 'md5', enc = 'hex' } = {}) {
   }
 }
 
-async function download (source, dest, opts = {}) {
+async function download$1 (source, dest, opts = {}) {
   const { bucket, path, size, mtime, md5Hash, storage } = source;
   const { dryRun, progress, interval = 1000, limit } = opts;
 
@@ -1159,7 +1434,40 @@ async function download (source, dest, opts = {}) {
   const tm = new Date(mtime + 'Z');
   await utimes(dest.path, tm, tm);
 
-  insertFile$1({ ...dest, md5Hash, size, mtime });
+  insertFile$2({ ...dest, md5Hash, size, mtime });
+}
+
+async function download (src, dst, opts = {}) {
+  const { size, mtime, md5Hash, googleId } = src;
+  const { dryRun, progress, interval = 1000, limit } = opts;
+
+  if (dryRun) {
+    log.colour('cyan')('%s downloaded (dryrun)', dst.path);
+    return
+  }
+
+  if (progress) log(log.cyan(dst.path));
+
+  await mkdir(dirname(dst.path), { recursive: true });
+
+  const drive = await getDriveAPI();
+  const hasher = hashStream();
+  const speedo$1 = speedo({ total: size });
+  const req = { fileId: googleId, alt: 'media' };
+  const reqOpts = { responseType: 'stream' };
+  const streams = [
+    (await drive.files.get(req, reqOpts)).data,
+    hasher,
+    limit && throttle(limit),
+    progress && speedo$1,
+    progress && progressStream({ onProgress, interval, speedo: speedo$1 }),
+    createWriteStream(dst.path)
+  ].filter(Boolean);
+
+  await pipeline(...streams);
+
+  if (mtime) await utimes(dst.path, mtime, mtime);
+  insertFile$2({ ...dst, size, mtime, md5Hash });
 }
 
 async function cp (src, dst, opts = {}) {
@@ -1168,7 +1476,8 @@ async function cp (src, dst, opts = {}) {
   const dir = getDirection(src, dst);
   const fns = {
     local_s3: upload,
-    s3_local: download
+    s3_local: download$1,
+    gdrive_local: download
   };
   const fn = fns[dir];
 
@@ -1194,7 +1503,7 @@ async function copy$1 (from, to, opts = {}) {
   log(log.blue(from.path));
   log(log.cyan(` -> ${to.path} copied`));
 
-  insertFile$1({ ...from, path: to.path });
+  insertFile$2({ ...from, path: to.path });
 }
 
 async function remove$1 (file, opts) {
@@ -1214,7 +1523,7 @@ async function remove$1 (file, opts) {
     }
     dir = dirname(dir);
   }
-  removeFile$1(file);
+  removeFile$2(file);
   log(log.cyan(`${file.path} deleted`));
 }
 
@@ -1238,7 +1547,7 @@ async function copy (from, to, opts = {}) {
     .promise();
 
   await to.stat();
-  insertFile(to);
+  insertFile$1(to);
 
   log(log.blue(from.url));
   log(log.cyan(` -> ${to.url} copied`));
@@ -1254,7 +1563,7 @@ async function remove (file, opts) {
 
   const s3 = getS3();
   await s3.deleteObject({ Bucket: file.bucket, Key: file.path }).promise();
-  removeFile(file);
+  removeFile$1(file);
   log(log.cyan(`${file.url} removed`));
 }
 
@@ -1335,7 +1644,8 @@ function getFunctions (src, dst) {
   const paths = {
     localPath: (src.isLocal && src.path) || (dst.isLocal && dst.path),
     s3Bucket: (src.isS3 && src.bucket) || (dst.isS3 && dst.bucket),
-    s3Path: (src.isS3 && src.path) || (dst.isS3 && dst.path)
+    s3Path: (src.isS3 && src.path) || (dst.isS3 && dst.path),
+    gdrivePath: (src.isGdrive && src.path) || (dst.isGdrive && dst.path)
   };
   return {
     local_s3: {
@@ -1357,6 +1667,18 @@ function getFunctions (src, dst) {
       differences: localS3Diff.all,
       duplicates: duplicates.all,
       srcContent: s3Content,
+      dstContent: localContent,
+      copy: download$1,
+      destCopy: copy$1,
+      remove: remove$1
+    },
+    gdrive_local: {
+      paths,
+      newFiles: gdriveNotLocal.all,
+      oldFiles: localNotGdrive.all,
+      differences: localGdriveDiff.all,
+      duplicates: duplicates.all,
+      srcContent: gdriveContent,
       dstContent: localContent,
       copy: download,
       destCopy: copy$1,
@@ -1387,6 +1709,26 @@ const s3NotLocal = sql(`
   )
 `);
 
+const localNotGdrive = sql(`
+  SELECT * FROM local_file_view
+  WHERE path LIKE $localPath || '%'
+  AND contentId NOT IN (
+    SELECT contentId
+    FROM gdrive_file
+    WHERE path LIKE $gdrivePath || '%'
+  )
+`);
+
+const gdriveNotLocal = sql(`
+  SELECT * FROM gdrive_file_view
+  WHERE path LIKE $gdrivePath || '%'
+  AND contentId NOT IN (
+    SELECT contentId
+    FROM local_file
+    WHERE path LIKE $localPath || '%'
+  )
+`);
+
 const localS3Diff = sql(`
   SELECT * FROM local_and_s3_view
   WHERE localPath LIKE $localPath || '%'
@@ -1394,6 +1736,14 @@ const localS3Diff = sql(`
   AND   s3Path LIKE $s3Path || '%'
   AND   substr(localPath, 1 + length($localPath)) !=
           substr(s3Path, 1 + length($s3Path))
+`);
+
+const localGdriveDiff = sql(`
+  SELECT * FROM local_and_gdrive_view
+  WHERE localPath LIKE $localPath || '%'
+  AND   gdrivePath LIKE $gdrivePath || '%'
+  AND   substr(localPath, 1 + length($localPath)) !=
+          substr(gdrivePath, 1 + length($gdrivePath))
 `);
 
 const duplicates = sql(`
@@ -1413,6 +1763,12 @@ const s3Content = sql(`
   AND   path LIKE $s3Path || '%'
 `);
 
+const gdriveContent = sql(`
+  SELECT * FROM gdrive_file_view
+  WHERE contentId = $contentId
+  AND   path LIKE $gdrivePath || '%'
+`);
+
 async function rm (file, opts = {}) {
   file = File.fromUrl(file, { resolve: true });
   const fns = {
@@ -1421,12 +1777,14 @@ async function rm (file, opts = {}) {
   };
   const fn = fns[file.type];
 
+  if (!fn) throw new Error('Cannot rm ' + file.url)
+
   await file.stat();
   await fn(file, opts);
 }
 
 const prog = sade('s3cli');
-const version = '2.1.7';
+const version = '2.2.0';
 
 prog.version(version);
 
