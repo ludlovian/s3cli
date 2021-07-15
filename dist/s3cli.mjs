@@ -455,7 +455,7 @@ BEGIN
         (md5Hash, size, contentType)
     VALUES
         (NEW.md5Hash, NEW.size, NEW.contentType)
-    ON CONFLICT DO UPDATE
+    ON CONFLICT(md5Hash, size) DO UPDATE
         SET contentType = excluded.contentType,
             updated     = excluded.updated
         WHERE contentType != excluded.contentType;
@@ -469,7 +469,7 @@ BEGIN
     WHERE   md5Hash = NEW.md5Hash
     AND     size    = NEW.size
 
-    ON CONFLICT DO UPDATE
+    ON CONFLICT(path) DO UPDATE
         SET contentId   = excluded.contentId,
             mtime       = excluded.mtime,
             updated     = excluded.updated
@@ -486,7 +486,7 @@ BEGIN
         (md5Hash, size, contentType)
     VALUES
         (NEW.md5Hash, NEW.size, NEW.contentType)
-    ON CONFLICT DO UPDATE
+    ON CONFLICT(md5Hash, size) DO UPDATE
         SET contentType = excluded.contentType,
             updated     = excluded.updated
         WHERE contentType != excluded.contentType;
@@ -502,7 +502,7 @@ BEGIN
     WHERE   md5Hash = NEW.md5Hash
     AND     size    = NEW.size
 
-    ON CONFLICT DO UPDATE
+    ON CONFLICT(bucket, path) DO UPDATE
         SET contentId   = excluded.contentId,
             mtime       = excluded.mtime,
             storage     = excluded.storage,
@@ -521,7 +521,7 @@ BEGIN
         (md5Hash, size, contentType)
     VALUES
         (NEW.md5Hash, NEW.size, NEW.contentType)
-    ON CONFLICT DO UPDATE
+    ON CONFLICT(md5Hash, size) DO UPDATE
         SET contentType = excluded.contentType,
             updated     = excluded.updated
         WHERE contentType != excluded.contentType;
@@ -536,7 +536,7 @@ BEGIN
     WHERE   md5Hash = NEW.md5Hash
     AND     size    = NEW.size
 
-    ON CONFLICT DO UPDATE
+    ON CONFLICT(path) DO UPDATE
         SET contentId   = excluded.contentId,
             mtime       = excluded.mtime,
             googleId    = excluded.googleId,
@@ -1787,7 +1787,7 @@ async function rm (file, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.2.2';
+const version = '2.2.3';
 
 prog.version(version);
 
