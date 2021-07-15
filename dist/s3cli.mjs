@@ -9,7 +9,6 @@ import { homedir } from 'os';
 import SQLite from 'better-sqlite3';
 import { createHash } from 'crypto';
 import AWS from 'aws-sdk';
-import { fileURLToPath } from 'url';
 import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 
@@ -859,14 +858,13 @@ function unpack (s) {
   )
 }
 
+const PROJECT_DIR = '/home/alan/dev/s3cli/';
+const CREDENTIALS = PROJECT_DIR + 'credentials.json';
+
 const getDriveAPI = once(async function getDriveAPI () {
   const scopes = ['https://www.googleapis.com/auth/drive'];
   const { default: driveApi } = await import('@googleapis/drive');
-  const credentials = resolve(
-    fileURLToPath(import.meta.url),
-    '../../credentials.json'
-  );
-  process.env.GOOGLE_APPLICATION_CREDENTIALS = credentials;
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = CREDENTIALS;
   const auth = new driveApi.auth.GoogleAuth({ scopes });
   const authClient = await auth.getClient();
   return driveApi.drive({ version: 'v3', auth: authClient })
@@ -1789,7 +1787,7 @@ async function rm (file, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.2.1';
+const version = '2.2.2';
 
 prog.version(version);
 
