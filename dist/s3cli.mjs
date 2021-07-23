@@ -264,7 +264,7 @@ CREATE TABLE IF NOT EXISTS local_file(
     contentId   INTEGER NOT NULL REFERENCES content(contentId),
     mtime       TEXT NOT NULL,
     updated     TEXT DEFAULT (datetime('now'))
-);
+) WITHOUT ROWID;
 
 -- A file held on S3 with some content
 
@@ -276,7 +276,7 @@ CREATE TABLE IF NOT EXISTS s3_file(
     storage     TEXT NOT NULL,
     updated     TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (bucket, path)
-);
+) WITHOUT ROWID;
 
 -- A file on gdrive containing some content
 
@@ -286,7 +286,7 @@ CREATE TABLE IF NOT EXISTS gdrive_file(
     googleId    TEXT NOT NULL,
     mtime       TEXT NOT NULL,
     updated     TEXT DEFAULT (datetime('now'))
-);
+) WITHOUT ROWID;
 
 -- Indexes ------------------------------------------
 
@@ -1787,7 +1787,7 @@ async function rm (file, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.2.3';
+const version = '2.2.4';
 
 prog.version(version);
 
