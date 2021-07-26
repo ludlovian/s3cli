@@ -299,105 +299,76 @@ CREATE INDEX IF NOT EXISTS s3_file_i1
 CREATE INDEX IF NOT EXISTS gdrive_file_i1
   ON gdrive_file (contentId);
 
--- Triggers on Tables ------------------------------
+-- Orphan content ----------------------------------
 
--- Content is deleted once orphaned
--- Check performed after updates and deletes of files tables
+-- Updates & deletes to the file tables result in a virtual
+-- delete of the content view. In turn, this results in cleaning
+-- out orphan content if they are not in use anywhere
+
+-- The view of all used content
+
+CREATE VIEW IF NOT EXISTS content_v AS
+  SELECT contentId FROM local_file
+  UNION ALL
+  SELECT contentId FROM s3_file
+  UNION ALL
+  SELECT contentId FROM gdrive_file;
+
+-- The trigger to attempt to remove from this view
+
+CREATE TRIGGER IF NOT EXISTS content_v_td
+INSTEAD OF DELETE ON content_v
+BEGIN
+  DELETE FROM content
+  WHERE  contentId = OLD.contentId
+  AND NOT EXISTS (
+    SELECT contentId from content_v
+    WHERE  contentId = OLD.contentId
+  );
+END;
+
+-- The triggers to remove once the file tables are deleted or updated
 
 CREATE TRIGGER IF NOT EXISTS local_file_td
 AFTER DELETE ON local_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS local_file_tu
 AFTER UPDATE OF contentId ON local_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS s3_file_td
 AFTER DELETE ON s3_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS s3_file_tu
 AFTER UPDATE OF contentId ON s3_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS gdrive_file_td
 AFTER DELETE ON gdrive_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS gdrive_file_tu
 AFTER UPDATE OF contentId ON gdrive_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 -- Main views of files --------------------------
@@ -766,7 +737,7 @@ const listFiles$1 = sql(`
   SELECT  bucket, path
   FROM    s3_file
   WHERE   bucket = $bucket
-  AND     path LIKE $path || '%'
+  AND     path BETWEEN $path AND $path || '~'
 `);
 
 const removeFile$1 = sql(`
@@ -880,7 +851,7 @@ const insertFile = sql(`
 const listFiles = sql(`
   SELECT  path
   FROM    gdrive_file
-  WHERE   path LIKE $path || '%'
+  WHERE   path BETWEEN $path AND $path || '~'
 `);
 
 const removeFile = sql(`
@@ -1191,7 +1162,7 @@ const STORAGE = {
 const localList = sql(`
   SELECT *
   FROM local_file_view
-  WHERE path LIKE $path || '%'
+  WHERE path BETWEEN $path AND $path || '~'
   ORDER BY path
 `);
 
@@ -1199,14 +1170,14 @@ const s3List = sql(`
   SELECT *
   FROM s3_file_view
   WHERE bucket = $bucket
-  AND   path LIKE $path || '%'
+  AND   path BETWEEN $path AND $path || '~'
   ORDER BY bucket, path
 `);
 
 const gdriveList = sql(`
   SELECT *
   FROM gdrive_file_view
-  WHERE path LIKE $path || '%'
+  WHERE path BETWEEN $path AND $path || '~'
   ORDER BY path
 `);
 
@@ -1692,59 +1663,59 @@ function getFunctions (src, dst) {
 
 const localNotS3 = sql(`
   SELECT * FROM local_file_view
-  WHERE path LIKE $localPath || '%'
+  WHERE path BETWEEN $localPath AND $localPath || '~'
   AND contentId NOT IN (
     SELECT contentId
     FROM s3_file
     WHERE bucket = $s3Bucket
-    AND   path LIKE $s3Path || '%'
+    AND   path BETWEEN $s3Path AND $s3Path || '~'
   )
 `);
 
 const s3NotLocal = sql(`
   SELECT * FROM s3_file_view
   WHERE bucket = $s3Bucket
-  AND   path LIKE $s3Path || '%'
+  AND   path BETWEEN $s3Path AND $s3Path || '~'
   AND   contentId NOT IN (
     SELECT contentId
     FROM local_file
-    WHERE path LIKE $localPath || '%'
+    WHERE path BETWEEN $localPath AND $localPath || '~'
   )
 `);
 
 const localNotGdrive = sql(`
   SELECT * FROM local_file_view
-  WHERE path LIKE $localPath || '%'
+  WHERE path BETWEEN $localPath AND $localPath || '~'
   AND contentId NOT IN (
     SELECT contentId
     FROM gdrive_file
-    WHERE path LIKE $gdrivePath || '%'
+    WHERE path BETWEEN $gdrivePath AND $gdrivePath || '~'
   )
 `);
 
 const gdriveNotLocal = sql(`
   SELECT * FROM gdrive_file_view
-  WHERE path LIKE $gdrivePath || '%'
+  WHERE path BETWEEN $gdrivePath AND $gdrivePath || '~'
   AND contentId NOT IN (
     SELECT contentId
     FROM local_file
-    WHERE path LIKE $localPath || '%'
+    WHERE path BETWEEN $localPath AND $localPath || '~'
   )
 `);
 
 const localS3Diff = sql(`
   SELECT * FROM local_and_s3_view
-  WHERE localPath LIKE $localPath || '%'
+  WHERE localPath BETWEEN $localPath AND $localPath || '~'
   AND   s3Bucket = $s3Bucket
-  AND   s3Path LIKE $s3Path || '%'
+  AND   s3Path BETWEEN $s3Path AND $s3Path || '~'
   AND   substr(localPath, 1 + length($localPath)) !=
           substr(s3Path, 1 + length($s3Path))
 `);
 
 const localGdriveDiff = sql(`
   SELECT * FROM local_and_gdrive_view
-  WHERE localPath LIKE $localPath || '%'
-  AND   gdrivePath LIKE $gdrivePath || '%'
+  WHERE localPath BETWEEN $localPath AND $localPath || '~'
+  AND   gdrivePath BETWEEN $gdrivePath AND $gdrivePath || '~'
   AND   substr(localPath, 1 + length($localPath)) !=
           substr(gdrivePath, 1 + length($gdrivePath))
 `);
@@ -1756,20 +1727,20 @@ const duplicates = sql(`
 const localContent = sql(`
   SELECT * FROM local_file_view
   WHERE contentId = $contentId
-  AND   path LIKE $localPath || '%'
+  AND   path BETWEEN $localPath AND $localPath || '~'
 `);
 
 const s3Content = sql(`
   SELECT * FROM s3_file_view
   WHERE contentId = $contentId
   AND   bucket = $s3Bucket
-  AND   path LIKE $s3Path || '%'
+  AND   path BETWEEN $s3Path AND $s3Path || '~'
 `);
 
 const gdriveContent = sql(`
   SELECT * FROM gdrive_file_view
   WHERE contentId = $contentId
-  AND   path LIKE $gdrivePath || '%'
+  AND   path BETWEEN $gdrivePath AND $gdrivePath || '~'
 `);
 
 async function rm (file, opts = {}) {
@@ -1787,7 +1758,7 @@ async function rm (file, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.2.4';
+const version = '2.2.5';
 
 prog.version(version);
 
