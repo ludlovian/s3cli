@@ -11,7 +11,7 @@ export const listFiles = sql(`
   SELECT  bucket, path
   FROM    s3_file
   WHERE   bucket = $bucket
-  AND     path LIKE $path || '%'
+  AND     path BETWEEN $path AND $path || '~'
 `)
 
 export const removeFile = sql(`

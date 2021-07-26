@@ -131,59 +131,59 @@ function getFunctions (src, dst) {
 
 const localNotS3 = sql(`
   SELECT * FROM local_file_view
-  WHERE path LIKE $localPath || '%'
+  WHERE path BETWEEN $localPath AND $localPath || '~'
   AND contentId NOT IN (
     SELECT contentId
     FROM s3_file
     WHERE bucket = $s3Bucket
-    AND   path LIKE $s3Path || '%'
+    AND   path BETWEEN $s3Path AND $s3Path || '~'
   )
 `)
 
 const s3NotLocal = sql(`
   SELECT * FROM s3_file_view
   WHERE bucket = $s3Bucket
-  AND   path LIKE $s3Path || '%'
+  AND   path BETWEEN $s3Path AND $s3Path || '~'
   AND   contentId NOT IN (
     SELECT contentId
     FROM local_file
-    WHERE path LIKE $localPath || '%'
+    WHERE path BETWEEN $localPath AND $localPath || '~'
   )
 `)
 
 const localNotGdrive = sql(`
   SELECT * FROM local_file_view
-  WHERE path LIKE $localPath || '%'
+  WHERE path BETWEEN $localPath AND $localPath || '~'
   AND contentId NOT IN (
     SELECT contentId
     FROM gdrive_file
-    WHERE path LIKE $gdrivePath || '%'
+    WHERE path BETWEEN $gdrivePath AND $gdrivePath || '~'
   )
 `)
 
 const gdriveNotLocal = sql(`
   SELECT * FROM gdrive_file_view
-  WHERE path LIKE $gdrivePath || '%'
+  WHERE path BETWEEN $gdrivePath AND $gdrivePath || '~'
   AND contentId NOT IN (
     SELECT contentId
     FROM local_file
-    WHERE path LIKE $localPath || '%'
+    WHERE path BETWEEN $localPath AND $localPath || '~'
   )
 `)
 
 const localS3Diff = sql(`
   SELECT * FROM local_and_s3_view
-  WHERE localPath LIKE $localPath || '%'
+  WHERE localPath BETWEEN $localPath AND $localPath || '~'
   AND   s3Bucket = $s3Bucket
-  AND   s3Path LIKE $s3Path || '%'
+  AND   s3Path BETWEEN $s3Path AND $s3Path || '~'
   AND   substr(localPath, 1 + length($localPath)) !=
           substr(s3Path, 1 + length($s3Path))
 `)
 
 const localGdriveDiff = sql(`
   SELECT * FROM local_and_gdrive_view
-  WHERE localPath LIKE $localPath || '%'
-  AND   gdrivePath LIKE $gdrivePath || '%'
+  WHERE localPath BETWEEN $localPath AND $localPath || '~'
+  AND   gdrivePath BETWEEN $gdrivePath AND $gdrivePath || '~'
   AND   substr(localPath, 1 + length($localPath)) !=
           substr(gdrivePath, 1 + length($gdrivePath))
 `)
@@ -195,18 +195,18 @@ const duplicates = sql(`
 const localContent = sql(`
   SELECT * FROM local_file_view
   WHERE contentId = $contentId
-  AND   path LIKE $localPath || '%'
+  AND   path BETWEEN $localPath AND $localPath || '~'
 `)
 
 const s3Content = sql(`
   SELECT * FROM s3_file_view
   WHERE contentId = $contentId
   AND   bucket = $s3Bucket
-  AND   path LIKE $s3Path || '%'
+  AND   path BETWEEN $s3Path AND $s3Path || '~'
 `)
 
 const gdriveContent = sql(`
   SELECT * FROM gdrive_file_view
   WHERE contentId = $contentId
-  AND   path LIKE $gdrivePath || '%'
+  AND   path BETWEEN $gdrivePath AND $gdrivePath || '~'
 `)

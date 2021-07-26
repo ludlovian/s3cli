@@ -10,7 +10,7 @@ export const insertFile = sql(`
 export const listFiles = sql(`
   SELECT  path
   FROM    gdrive_file
-  WHERE   path LIKE $path || '%'
+  WHERE   path BETWEEN $path AND $path || '~'
 `)
 
 export const removeFile = sql(`

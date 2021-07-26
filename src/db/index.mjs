@@ -96,105 +96,76 @@ CREATE INDEX IF NOT EXISTS s3_file_i1
 CREATE INDEX IF NOT EXISTS gdrive_file_i1
   ON gdrive_file (contentId);
 
--- Triggers on Tables ------------------------------
+-- Orphan content ----------------------------------
 
--- Content is deleted once orphaned
--- Check performed after updates and deletes of files tables
+-- Updates & deletes to the file tables result in a virtual
+-- delete of the content view. In turn, this results in cleaning
+-- out orphan content if they are not in use anywhere
+
+-- The view of all used content
+
+CREATE VIEW IF NOT EXISTS content_v AS
+  SELECT contentId FROM local_file
+  UNION ALL
+  SELECT contentId FROM s3_file
+  UNION ALL
+  SELECT contentId FROM gdrive_file;
+
+-- The trigger to attempt to remove from this view
+
+CREATE TRIGGER IF NOT EXISTS content_v_td
+INSTEAD OF DELETE ON content_v
+BEGIN
+  DELETE FROM content
+  WHERE  contentId = OLD.contentId
+  AND NOT EXISTS (
+    SELECT contentId from content_v
+    WHERE  contentId = OLD.contentId
+  );
+END;
+
+-- The triggers to remove once the file tables are deleted or updated
 
 CREATE TRIGGER IF NOT EXISTS local_file_td
 AFTER DELETE ON local_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS local_file_tu
 AFTER UPDATE OF contentId ON local_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS s3_file_td
 AFTER DELETE ON s3_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS s3_file_tu
 AFTER UPDATE OF contentId ON s3_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS gdrive_file_td
 AFTER DELETE ON gdrive_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 CREATE TRIGGER IF NOT EXISTS gdrive_file_tu
 AFTER UPDATE OF contentId ON gdrive_file
 BEGIN
-    DELETE FROM content
-    WHERE   contentId = OLD.contentId
-    AND NOT EXISTS (
-        SELECT contentId FROM local_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM s3_file
-        WHERE  contentId = OLD.contentId)
-    AND NOT EXISTS (
-        SELECT contentId FROM gdrive_file
-        WHERE  contentId = OLD.contentId);
+    DELETE FROM content_v
+    WHERE  contentId = OLD.contentId;
 END;
 
 -- Main views of files --------------------------

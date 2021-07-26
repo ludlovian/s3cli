@@ -49,7 +49,7 @@ const STORAGE = {
 const localList = sql(`
   SELECT *
   FROM local_file_view
-  WHERE path LIKE $path || '%'
+  WHERE path BETWEEN $path AND $path || '~'
   ORDER BY path
 `)
 
@@ -57,13 +57,13 @@ const s3List = sql(`
   SELECT *
   FROM s3_file_view
   WHERE bucket = $bucket
-  AND   path LIKE $path || '%'
+  AND   path BETWEEN $path AND $path || '~'
   ORDER BY bucket, path
 `)
 
 const gdriveList = sql(`
   SELECT *
   FROM gdrive_file_view
-  WHERE path LIKE $path || '%'
+  WHERE path BETWEEN $path AND $path || '~'
   ORDER BY path
 `)
