@@ -1,6 +1,6 @@
 import log from 'logjs'
 
-import { removeFile } from './sql.mjs'
+import db from '../db.mjs'
 import { getS3 } from './util.mjs'
 
 export default async function remove (file, opts) {
@@ -13,6 +13,6 @@ export default async function remove (file, opts) {
 
   const s3 = getS3()
   await s3.deleteObject({ Bucket: file.bucket, Key: file.path }).promise()
-  removeFile(file)
+  db.deleteS3Files([file])
   log(log.cyan(`${file.url} removed`))
 }

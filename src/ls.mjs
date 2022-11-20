@@ -2,16 +2,17 @@ import log from 'logjs'
 
 import File from './lib/file.mjs'
 import { comma, fmtSize } from './util.mjs'
-import { sql } from './db/index.mjs'
+import db from './db.mjs'
 
 export default async function ls (url, opts) {
+  db.open()
   const { long, rescan, human, total } = opts
   url = File.fromUrl(url, { resolve: true })
 
   const list = {
-    local: localList.all,
-    s3: s3List.all,
-    gdrive: gdriveList.all
+    local: db.getLocalFiles,
+    s3: db.getS3Files,
+    gdrive: db.getGdriveFiles
   }[url.type]
 
   if (rescan) await url.scan()
@@ -45,25 +46,3 @@ const STORAGE = {
   GLACIER: 'G',
   DEEP_ARCHIVE: 'D'
 }
-
-const localList = sql(`
-  SELECT *
-  FROM local_file_view
-  WHERE path BETWEEN $path AND $path || '~'
-  ORDER BY path
-`)
-
-const s3List = sql(`
-  SELECT *
-  FROM s3_file_view
-  WHERE bucket = $bucket
-  AND   path BETWEEN $path AND $path || '~'
-  ORDER BY bucket, path
-`)
-
-const gdriveList = sql(`
-  SELECT *
-  FROM gdrive_file_view
-  WHERE path BETWEEN $path AND $path || '~'
-  ORDER BY path
-`)

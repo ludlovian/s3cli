@@ -1,7 +1,7 @@
-import { sql } from '../db/index.mjs'
+import db from '../db.mjs'
 
 export default async function stat (file) {
-  const row = getDetails.get(file)
+  const row = db.getGDriveFiles(file)[0]
   if (!row) {
     throw new Error('Not found: ' + file.url)
   }
@@ -11,9 +11,3 @@ export default async function stat (file) {
   file.contentType = row.contentType
   file.md5Hash = row.md5Hash
 }
-
-const getDetails = sql(`
-  SELECT *
-  FROM gdrive_file_view
-  WHERE path = $path
-`)

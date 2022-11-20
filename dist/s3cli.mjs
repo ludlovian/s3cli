@@ -4,7 +4,7 @@ import { format } from 'util';
 import { createReadStream, realpathSync, createWriteStream } from 'fs';
 import mime from 'mime';
 import { readdir, lstat, mkdir, utimes, copyFile, unlink, rmdir } from 'fs/promises';
-import { resolve, join, dirname } from 'path';
+import { join, dirname } from 'path';
 import { homedir } from 'os';
 import SQLite from 'better-sqlite3';
 import { createHash } from 'crypto';
@@ -139,486 +139,219 @@ function makeLogger (base, changes = {}) {
 
 const log = makeLogger();
 
-function once (fn) {
-  function f (...args) {
-    if (f.called) return f.value
-    f.value = fn(...args);
-    f.called = true;
-    return f.value
+const DB_VERSION = 5;
+
+const db = {};
+
+let opened = false;
+
+function open () {
+  if (opened) return
+  opened = true;
+
+  const dbFile = process.env.DB || join(homedir(), '.databases', 'files.sqlite');
+  const _db = new SQLite(dbFile);
+  _db.pragma('foreign_keys=ON');
+  if (getVersion(_db) !== DB_VERSION) {
+    throw new Error('Wrong version of db: ' + dbFile)
   }
 
-  if (fn.name) {
-    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
-  }
-
-  return f
+  Object.assign(db, buildStoredProcs(_db));
+  Object.assign(db, buildQueries(_db));
 }
 
-function tidy (sql) {
-  return sql
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => !line.startsWith('--'))
-    .map(line => line.replaceAll(/  +/g, ' '))
-    .filter(Boolean)
-    .join(' ')
-    .trim()
-    .replaceAll(/; */g, ';')
-    .replace(/;$/, '')
+db.open = open;
+
+function getVersion (db) {
+  const sql = 'select version from dbversion';
+  let p = db.prepare(sql);
+  p = p.pluck();
+  return p.get()
 }
 
-function statement (stmt, opts = {}) {
-  const { pluck, all, get, db } = opts;
-  function exec (...args) {
-    args = args.map(arg => {
-      if (!arg || typeof arg !== 'object') return arg
-      return Object.fromEntries(
-        Object.entries(arg).map(([k, v]) => [
-          k,
-          v instanceof Date ? v.toISOString() : v
-        ])
-      )
-    });
-    if (stmt.includes(';')) return db().exec(stmt)
-    let prep = prepare(stmt, db);
-    if (pluck) prep = prep.pluck();
-    if (all) return prep.all(...args)
-    if (get) return prep.get(...args)
-    return prep.run(...args)
-  }
-  return Object.defineProperties(exec, {
-    pluck: { value: () => statement(stmt, { ...opts, pluck: true }) },
-    get: { get: () => statement(stmt, { ...opts, get: true }) },
-    all: { get: () => statement(stmt, { ...opts, all: true }) }
-  })
-}
-
-function transaction (_fn, db) {
-  let fn;
-  return (...args) => {
-    if (!fn) fn = db().transaction(_fn);
-    return fn(...args)
+function buildStoredProcs (db) {
+  const insertLocalFile = makeStoredProc(db, 'sp_insertLocalFile');
+  const deleteLocalFile = makeStoredProc(db, 'sp_deleteLocalFile');
+  const insertS3File = makeStoredProc(db, 'sp_insertS3File');
+  const deleteS3File = makeStoredProc(db, 'sp_deleteS3File');
+  const insertGdriveFile = makeStoredProc(db, 'sp_insertGdriveFile');
+  const deleteGdriveFile = makeStoredProc(db, 'sp_deleteGdriveFile');
+  return {
+    insertLocalFiles: db.transaction(files => files.forEach(insertLocalFile)),
+    insertS3Files: db.transaction(files => files.forEach(insertS3File)),
+    insertGdriveFiles: db.transaction(files => files.forEach(insertGdriveFile)),
+    deleteLocalFiles: db.transaction(files => files.forEach(deleteLocalFile)),
+    deleteS3Files: db.transaction(files => files.forEach(deleteS3File)),
+    deleteGdriveFiles: db.transaction(files => files.forEach(deleteGdriveFile))
   }
 }
 
-const cache = new Map();
-function prepare (stmt, db) {
-  let p = cache.get(stmt);
-  if (p) return p
-  p = db().prepare(stmt);
-  cache.set(stmt, p);
-  return p
+function buildQueries (db) {
+  const ret = {};
+  for (const [name, entry] of Object.entries(QUERIES)) {
+    const [sql, params] = entry;
+    const stmt = db.prepare(sql);
+    if (params.length) {
+      ret[name] = x => stmt.all(chk(x, ...params));
+    } else {
+      ret[name] = () => stmt.all();
+    }
+  }
+
+  // adjust exceptions
+  {
+    const fn = ret.locateLocalFile;
+    ret.locateLocalFile = x => fn(x)[0];
+  }
+
+  {
+    const fn = ret.getDuplicates;
+    ret.getDuplicates = () => fn().map(x => x.contentId);
+  }
+  return ret
 }
 
-const DBVERSION = 4;
-
-const db = once(() => {
-  const dbFile =
-    process.env.DB || resolve(homedir(), '.databases', 'files4.sqlite');
-  const db = new SQLite(dbFile);
-  db.exec(ddl);
-  const version = db
-    .prepare('select version from dbversion')
-    .pluck()
-    .get();
-  if (version !== DBVERSION) {
-    throw new Error('Wrong version of database: ' + dbFile)
+function makeStoredProc (db, name, noParams = false) {
+  if (noParams) {
+    const sql = `insert into ${name} values(null)`;
+    const stmt = db.prepare(sql);
+    return () => stmt.run()
+  } else {
+    const params = getProcParams(db, name);
+    const sql =
+      `insert into ${name}(${params.join(',')}) ` +
+      `values(${params.map(n => ':' + n).join(',')})`;
+    const stmt = db.prepare(sql);
+    return data => stmt.run(chk(data, ...params))
   }
+}
+
+function getProcParams (db, name) {
+  const sql = `select * from ${name}`;
   return db
-});
-
-function sql (text) {
-  return statement(tidy(text), { db })
+    .prepare(sql)
+    .columns()
+    .map(col => col.name)
 }
-sql.transaction = fn => transaction(fn, db);
 
-const ddl = tidy(`
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-
-BEGIN TRANSACTION;
-
--- MAIN database ---------------------------------
-
--- Version of the database schema we are using
-
-CREATE VIEW IF NOT EXISTS dbVersion AS
-SELECT 4 AS version;
-
--- Unique item of content, as identified by (md5, size)
---
-
-CREATE TABLE IF NOT EXISTS content(
-    contentId   INTEGER PRIMARY KEY NOT NULL,
-    md5Hash     TEXT NOT NULL,
-    size        INTEGER NOT NULL,
-    contentType TEXT,
-    updated     TEXT DEFAULT (datetime('now')),
-    UNIQUE (md5Hash, size)
-);
-
--- A local file containing some content
-
-CREATE TABLE IF NOT EXISTS local_file(
-    path        TEXT NOT NULL PRIMARY KEY,
-    contentId   INTEGER NOT NULL REFERENCES content(contentId),
-    mtime       TEXT NOT NULL,
-    updated     TEXT DEFAULT (datetime('now'))
-) WITHOUT ROWID;
-
--- A file held on S3 with some content
-
-CREATE TABLE IF NOT EXISTS s3_file(
-    bucket      TEXT NOT NULL,
-    path        TEXT NOT NULL,
-    contentId   INTEGER NOT NULL REFERENCES content(contentId),
-    mtime       TEXT NOT NULL,
-    storage     TEXT NOT NULL,
-    updated     TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (bucket, path)
-) WITHOUT ROWID;
-
--- A file on gdrive containing some content
-
-CREATE TABLE IF NOT EXISTS gdrive_file(
-    path        TEXT NOT NULL PRIMARY KEY,
-    contentId   INTEGER NOT NULL REFERENCES content(contentId),
-    googleId    TEXT NOT NULL,
-    mtime       TEXT NOT NULL,
-    updated     TEXT DEFAULT (datetime('now'))
-) WITHOUT ROWID;
-
--- Indexes ------------------------------------------
-
-CREATE INDEX IF NOT EXISTS local_file_i1
-  ON local_file (contentId);
-
-CREATE INDEX IF NOT EXISTS s3_file_i1
-  ON s3_file (contentId);
-
-CREATE INDEX IF NOT EXISTS gdrive_file_i1
-  ON gdrive_file (contentId);
-
--- Orphan content ----------------------------------
-
--- Updates & deletes to the file tables result in a virtual
--- delete of the content view. In turn, this results in cleaning
--- out orphan content if they are not in use anywhere
-
--- The view of all used content
-
-CREATE VIEW IF NOT EXISTS content_v AS
-  SELECT contentId FROM local_file
-  UNION ALL
-  SELECT contentId FROM s3_file
-  UNION ALL
-  SELECT contentId FROM gdrive_file;
-
--- The trigger to attempt to remove from this view
-
-CREATE TRIGGER IF NOT EXISTS content_v_td
-INSTEAD OF DELETE ON content_v
-BEGIN
-  DELETE FROM content
-  WHERE  contentId = OLD.contentId
-  AND NOT EXISTS (
-    SELECT contentId from content_v
-    WHERE  contentId = OLD.contentId
-  );
-END;
-
--- The triggers to remove once the file tables are deleted or updated
-
-CREATE TRIGGER IF NOT EXISTS local_file_td
-AFTER DELETE ON local_file
-BEGIN
-    DELETE FROM content_v
-    WHERE  contentId = OLD.contentId;
-END;
-
-CREATE TRIGGER IF NOT EXISTS local_file_tu
-AFTER UPDATE OF contentId ON local_file
-BEGIN
-    DELETE FROM content_v
-    WHERE  contentId = OLD.contentId;
-END;
-
-CREATE TRIGGER IF NOT EXISTS s3_file_td
-AFTER DELETE ON s3_file
-BEGIN
-    DELETE FROM content_v
-    WHERE  contentId = OLD.contentId;
-END;
-
-CREATE TRIGGER IF NOT EXISTS s3_file_tu
-AFTER UPDATE OF contentId ON s3_file
-BEGIN
-    DELETE FROM content_v
-    WHERE  contentId = OLD.contentId;
-END;
-
-CREATE TRIGGER IF NOT EXISTS gdrive_file_td
-AFTER DELETE ON gdrive_file
-BEGIN
-    DELETE FROM content_v
-    WHERE  contentId = OLD.contentId;
-END;
-
-CREATE TRIGGER IF NOT EXISTS gdrive_file_tu
-AFTER UPDATE OF contentId ON gdrive_file
-BEGIN
-    DELETE FROM content_v
-    WHERE  contentId = OLD.contentId;
-END;
-
--- Main views of files --------------------------
-
--- locally held file
-
-CREATE VIEW IF NOT EXISTS local_file_view AS
-SELECT  f.path          AS path,
-        c.size          AS size,
-        f.mtime         AS mtime,
-        c.contentType   AS contentType,
-        c.md5Hash       AS md5Hash,
-        f.contentId     AS contentId
-FROM    local_file f
-JOIN    content c USING (contentId)
-ORDER BY f.path;
-
--- S3 file
-
-CREATE VIEW IF NOT EXISTS s3_file_view AS
-SELECT  f.bucket        AS bucket,
-        f.path          AS path,
-        c.size          AS size,
-        f.mtime         AS mtime,
-        f.storage       AS storage,
-        c.contentType   AS contentType,
-        c.md5Hash       AS md5Hash,
-        f.contentId     AS contentId
-FROM    s3_file f
-JOIN    content c USING (contentId)
-ORDER BY f.bucket, f.path;
-
--- gdrive file
-
-CREATE VIEW IF NOT EXISTS gdrive_file_view AS
-SELECT  f.path          AS path,
-        f.googleId      AS googleId,
-        c.size          AS size,
-        f.mtime         AS mtime,
-        c.contentType   AS contentType,
-        c.md5Hash       AS md5Hash,
-        f.contentId     AS contentId
-FROM    gdrive_file f
-JOIN    content c USING (contentId)
-ORDER BY f.path;
-
--- view inserts ---------------------------------
-
--- local file
-
-CREATE TRIGGER IF NOT EXISTS local_file_view_ti
-INSTEAD OF INSERT ON local_file_view
-BEGIN
-    INSERT INTO content
-        (md5Hash, size, contentType)
-    VALUES
-        (NEW.md5Hash, NEW.size, NEW.contentType)
-    ON CONFLICT(md5Hash, size) DO UPDATE
-        SET contentType = excluded.contentType,
-            updated     = excluded.updated
-        WHERE contentType != excluded.contentType;
-
-    INSERT INTO local_file
-        (path, contentId, mtime)
-    SELECT  NEW.path,
-            contentId,
-            datetime(NEW.mtime)
-    FROM    content
-    WHERE   md5Hash = NEW.md5Hash
-    AND     size    = NEW.size
-
-    ON CONFLICT(path) DO UPDATE
-        SET contentId   = excluded.contentId,
-            mtime       = excluded.mtime,
-            updated     = excluded.updated
-        WHERE contentId != excluded.contentId
-        OR    mtime     != excluded.mtime;
-END;
-
--- s3 file
-
-CREATE TRIGGER IF NOT EXISTS s3_file_view_ti
-INSTEAD OF INSERT ON s3_file_view
-BEGIN
-    INSERT INTO content
-        (md5Hash, size, contentType)
-    VALUES
-        (NEW.md5Hash, NEW.size, NEW.contentType)
-    ON CONFLICT(md5Hash, size) DO UPDATE
-        SET contentType = excluded.contentType,
-            updated     = excluded.updated
-        WHERE contentType != excluded.contentType;
-
-    INSERT INTO s3_file
-        (bucket, path, contentId, mtime, storage)
-    SELECT  NEW.bucket,
-            NEW.path,
-            contentId,
-            datetime(NEW.mtime),
-            NEW.storage
-    FROM    content
-    WHERE   md5Hash = NEW.md5Hash
-    AND     size    = NEW.size
-
-    ON CONFLICT(bucket, path) DO UPDATE
-        SET contentId   = excluded.contentId,
-            mtime       = excluded.mtime,
-            storage     = excluded.storage,
-            updated     = excluded.updated
-        WHERE contentId != excluded.contentId
-        OR    mtime     != excluded.mtime
-        OR    storage   != excluded.storage;
-END;
-
--- gdrive file
-
-CREATE TRIGGER IF NOT EXISTS gdrive_file_view_ti
-INSTEAD OF INSERT ON gdrive_file_view
-BEGIN
-    INSERT INTO content
-        (md5Hash, size, contentType)
-    VALUES
-        (NEW.md5Hash, NEW.size, NEW.contentType)
-    ON CONFLICT(md5Hash, size) DO UPDATE
-        SET contentType = excluded.contentType,
-            updated     = excluded.updated
-        WHERE contentType != excluded.contentType;
-
-    INSERT INTO gdrive_file
-        (path, contentId, mtime, googleId)
-    SELECT  NEW.path,
-            contentId,
-            datetime(NEW.mtime),
-            NEW.googleId
-    FROM    content
-    WHERE   md5Hash = NEW.md5Hash
-    AND     size    = NEW.size
-
-    ON CONFLICT(path) DO UPDATE
-        SET contentId   = excluded.contentId,
-            mtime       = excluded.mtime,
-            googleId    = excluded.googleId,
-            updated     = excluded.updated
-        WHERE contentId != excluded.contentId
-        OR    mtime     != excluded.mtime
-        OR    googleId  != excluded.googleId;
-END;
-
--- Sync helping views -------------------------------
-
--- On both local and S3 once
-
-CREATE VIEW IF NOT EXISTS local_and_s3_view AS
-SELECT l.path       AS localPath,
-       s.bucket     AS s3Bucket,
-       s.path       AS s3Path,
-       l.contentId  as contentId
-FROM   local_file l
-JOIN   s3_file s USING (contentId)
-GROUP BY contentId
-HAVING count(l.path) = 1
-AND    count(s.path) = 1;
-
--- On both local and gdrive once
-
-CREATE VIEW IF NOT EXISTS local_and_gdrive_view AS
-SELECT l.path       AS localPath,
-       g.path       AS gdrivePath,
-       l.contentId  as contentId
-FROM   local_file l
-JOIN   gdrive_file g USING (contentId)
-GROUP BY contentId
-HAVING count(l.path) = 1
-AND    count(g.path) = 1;
-
--- Multiple copies exist somewhere
-
-CREATE VIEW IF NOT EXISTS duplicates_view AS
-SELECT  contentId AS contentId
-FROM    local_file
-GROUP BY contentId
-HAVING count(contentId) > 1
-
-UNION
-
-SELECT  contentId AS contentId
-FROM    s3_file
-GROUP BY contentId
-HAVING count(contentId) > 1
-
-UNION
-
-SELECT  contentId AS contentId
-FROM    gdrive_file
-GROUP BY contentId
-HAVING count(contentId) > 1;
-
-COMMIT;
-`);
-
-const listFiles$2 = sql(`
-  SELECT path
-  FROM   local_file
-  WHERE  path like $path || '%'
-`);
-
-const insertFile$2 = sql(`
-  INSERT INTO local_file_view
-    (path, size, mtime, contentType, md5Hash)
-  VALUES
-    ($path, $size, $mtime, $contentType, $md5Hash)
-`);
-
-const removeFile$2 = sql(`
-  DELETE FROM local_file
-  WHERE path = $path
-`);
-
-const findHash = sql(`
-  SELECT md5Hash
-  FROM   local_file_view
-  WHERE  path = $path
-  AND    size = $size
-  AND    mtime = datetime($mtime)
-`).pluck().get;
+function chk (data, ...params) {
+  const ret = {};
+  const supplied = Object.getOwnPropertyNames(data);
+  for (const param of params) {
+    if (!supplied.includes(param)) {
+      console.error('Was expecting to see "%s" in "%o"', param, data);
+      throw new Error('Bad parameter given')
+    }
+    let v = data[param];
+    if (v instanceof Date) v = v.toISOString();
+    ret[param] = v;
+  }
+  return ret
+}
+
+const QUERIES = {
+  getLocalFiles: [
+    "select * from qry_localFiles where path glob :path || '*'",
+    ['path']
+  ],
+  getS3Files: [
+    'select * from qry_s3Files ' +
+      "where bucket = :bucket and path glob :path || '*'",
+    ['bucket', 'path']
+  ],
+  getGdriveFiles: [
+    "select * from qry_gdriveFiles where path glob :path || '*'",
+    ['path']
+  ],
+  locateLocalFile: [
+    'select * from qry_localFiles ' +
+      'where path = :path and size = :size and mtime = datetime(:mtime)',
+    ['path', 'size', 'mtime']
+  ],
+  getLocalNotS3: [
+    'select * from qry_localFiles ' +
+      "where path glob :localPath || '*' " +
+      'and contentId not in (' +
+      'select contentId from qry_s3Files ' +
+      "where bucket = :s3Bucket and path glob :s3Path || '*')",
+    ['localPath', 's3Bucket', 's3Path']
+  ],
+  getS3NotLocal: [
+    'select * from qry_s3Files ' +
+      "where bucket = :s3Bucket and path glob :s3Path || '*' " +
+      'and contentId not in (' +
+      'select contentId from qry_localFiles ' +
+      "where path glob :localPath || '*')",
+    ['localPath', 's3Bucket', 's3Path']
+  ],
+  getLocalNotGdrive: [
+    'select * from qry_localFiles ' +
+      "where path glob :localPath || '*' " +
+      'and contentId not in (' +
+      'select contentId from qry_gdriveFiles ' +
+      "where path glob :gdrivePath || '*')",
+    ['localPath', 'gdrivePath']
+  ],
+  getGdriveNotLocal: [
+    'select * from qry_gdriveFiles ' +
+      "where path glob :gdrivePath || '*' " +
+      'and contentId not in (' +
+      'select contentId from qry_localFiles ' +
+      "where path glob :localPath || '*')",
+    ['localPath', 'gdrivePath']
+  ],
+  getLocalS3Diffs: [
+    'select * from qry_localAndS3 ' +
+      "where localPath glob :localPath || '*' " +
+      'and s3Bucket = :s3Bucket ' +
+      "and s3Path glob :s3Path || '*' " +
+      'and substr(localPath, 1+length(:localPath)) != ' +
+      'substr(s3Path, 1 + length(:s3Path))',
+    ['localPath', 's3Bucket', 's3Path']
+  ],
+  getLocalGdriveDiffs: [
+    'select * from qry_localAndGdrive ' +
+      "where localPath glob :localPath || '*' " +
+      "and gdrivePath glob :gdrivePath || '*' " +
+      'and substr(localPath, 1+length(:localPath)) != ' +
+      'substr(gdrivePath, 1 + length(:gdrivePath))',
+    ['localPath', 'gdrivePath']
+  ],
+  getLocalContent: [
+    'select * from qry_localFiles ' +
+      'where contentId = :contentId ' +
+      "and path glob :localPath || '*'",
+    ['contentId', 'localPath']
+  ],
+  getS3Content: [
+    'select * from qry_s3Files ' +
+      'where contentId = :contentId ' +
+      'and bucket = :s3Bucket ' +
+      "and path glob :s3Path || '*'",
+    ['contentId', 's3Bucket', 's3Path']
+  ],
+  getGdriveContent: [
+    'select * from qry_gdriveFiles ' +
+      'where contentId = :contentId ' +
+      "and path glob :gdrivePath || '*'",
+    ['contentId', 'gdrivePath']
+  ],
+  getDuplicates: ['select * from qry_duplicates', []]
+};
 
 async function * scan$2 (root) {
   const File = root.constructor;
 
   let n = 0;
-  const old = new Set(listFiles$2.pluck().all(root));
-
-  const insertFiles = sql.transaction(files => {
-    for (const file of files) {
-      insertFile$2(file);
-      old.delete(file.path);
-    }
-  });
-  const deleteOld = sql.transaction(paths => {
-    for (const path of paths) {
-      removeFile$2({ path });
-    }
-  });
+  const old = new Set(db.getLocalFiles(root).map(f => f.path));
 
   for await (const files of scanDir(root.path, File)) {
     n += files.length;
-    insertFiles(files);
+    db.insertLocalFiles(files);
+    files.forEach(f => old.delete(f.path));
     yield n;
   }
-  deleteOld([...old]);
+  db.deleteLocalFiles([...old].map(path => ({ path })));
 }
 
 async function * scanDir (dir, File) {
@@ -639,7 +372,10 @@ async function * scanDir (dir, File) {
   }
 }
 
-async function hashFile (filename, { algo = 'md5', enc = 'hex' } = {}) {
+async function hashFile (
+  filename,
+  { algo = 'md5', enc = 'hex' } = {}
+) {
   const hasher = createHash(algo);
   for await (const chunk of createReadStream(filename)) {
     hasher.update(chunk);
@@ -651,12 +387,28 @@ async function stat$2 (file) {
   const stats = await lstat(file.path);
   file.size = stats.size;
   file.mtime = stats.mtime;
-  file.md5Hash = findHash(file);
+  const f = db.locateLocalFile(file);
+  if (f) file.md5Hash = f.md5Hash;
   if (!file.md5Hash) {
     log.status('%s ... hashing', file.path);
     file.md5Hash = await hashFile(file.path);
-    insertFile$2(file);
+    db.insertLocalFiles([file]);
   }
+}
+
+function once (fn) {
+  function f (...args) {
+    if (f.called) return f.value
+    f.value = fn(...args);
+    f.called = true;
+    return f.value
+  }
+
+  if (fn.name) {
+    Object.defineProperty(f, 'name', { value: fn.name, configurable: true });
+  }
+
+  return f
 }
 
 function getDirection (src, dst) {
@@ -726,55 +478,22 @@ function onProgress ({ speedo }) {
   }
 }
 
-const insertFile$1 = sql(`
-  INSERT INTO s3_file_view
-    (bucket, path, size, mtime, storage, contentType, md5Hash)
-  VALUES
-    ($bucket, $path, $size, $mtime, $storage, $contentType, $md5Hash)
-`);
-
-const listFiles$1 = sql(`
-  SELECT  bucket, path
-  FROM    s3_file
-  WHERE   bucket = $bucket
-  AND     path BETWEEN $path AND $path || '~'
-`);
-
-const removeFile$1 = sql(`
-  DELETE FROM s3_file
-  WHERE bucket = $bucket
-  AND   path = $path
-`);
-
 async function * scan$1 (root) {
   const File = root.constructor;
+  const { bucket } = root;
   let n = 0;
   const s3 = getS3();
 
-  const old = new Set(listFiles$1.all(root).map(r => r.path));
+  const old = new Set(db.getS3Files(root).map(r => r.path));
 
-  const insertFiles = sql.transaction(files => {
-    for (const file of files) {
-      insertFile$1(file);
-      old.delete(file.path);
-    }
-  });
-
-  const deleteOld = sql.transaction(paths => {
-    const { bucket } = root;
-    for (const path of paths) {
-      removeFile$1({ bucket, path });
-    }
-  });
-
-  const request = { Bucket: root.bucket, Prefix: root.path };
+  const request = { Bucket: bucket, Prefix: root.path };
   while (true) {
     const result = await s3.listObjectsV2(request).promise();
     const files = [];
     for (const item of result.Contents) {
       const file = new File({
         type: 's3',
-        bucket: root.bucket,
+        bucket,
         path: item.Key,
         size: item.Size,
         mtime: item.LastModified,
@@ -785,14 +504,15 @@ async function * scan$1 (root) {
       files.push(file);
     }
     n += files.length;
-    insertFiles(files);
+    db.insertS3Files(files);
+    files.forEach(f => old.delete(f.path));
     yield n;
 
     if (!result.IsTruncated) break
     request.ContinuationToken = result.NextContinuationToken;
   }
 
-  deleteOld([...old]);
+  db.deleteS3Files([...old].map(path => ({ bucket, path })));
 }
 
 const MD_KEY = 's3cmd-attrs';
@@ -841,42 +561,12 @@ const getDriveAPI = once(async function getDriveAPI () {
   return driveApi.drive({ version: 'v3', auth: authClient })
 });
 
-const insertFile = sql(`
-  INSERT INTO gdrive_file_view
-    (path, size, mtime, googleId, contentType, md5Hash)
-  VALUES
-    ($path, $size, $mtime, $googleId, $contentType, $md5Hash)
-`);
-
-const listFiles = sql(`
-  SELECT  path
-  FROM    gdrive_file
-  WHERE   path BETWEEN $path AND $path || '~'
-`);
-
-const removeFile = sql(`
-  DELETE FROM gdrive_file
-  WHERE path = $path
-`);
-
 async function * scan (root) {
   const File = root.constructor;
   const drive = await getDriveAPI();
 
   let n = 0;
-  const old = new Set(listFiles.all(root).map(r => r.path));
-  const insertFiles = sql.transaction(files => {
-    for (const file of files) {
-      insertFile(file);
-      old.delete(file.path);
-    }
-  });
-  const deleteOld = sql.transaction(paths => {
-    for (const path of paths) {
-      removeFile({ path });
-    }
-  });
-
+  const old = new Set(db.getGdriveFiles(root).map(r => r.path));
   const query = {
     fields:
       'nextPageToken,files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)'
@@ -905,16 +595,19 @@ async function * scan (root) {
       .filter(f => !f.isFolder && f.path.startsWith(root.path))
       .map(f => File.like(root, f));
 
-    insertFiles(found);
-    n += found.length;
-    if (found.length) yield n;
+    if (found.length) {
+      db.insertGdriveFiles(found);
+      found.forEach(f => old.delete(f.path));
+      n += found.length;
+      yield n;
+    }
 
     if (!data.nextPageToken) break
     query.pageToken = data.nextPageToken;
     pResponse = drive.files.list(query);
   }
 
-  deleteOld([...old]);
+  db.deleteGdriveFiles([...old].map(path => ({ path })));
 }
 
 const folders = {};
@@ -953,7 +646,7 @@ function calcPath (f) {
 }
 
 async function stat (file) {
-  const row = getDetails.get(file);
+  const row = db.getGDriveFiles(file)[0];
   if (!row) {
     throw new Error('Not found: ' + file.url)
   }
@@ -963,12 +656,6 @@ async function stat (file) {
   file.contentType = row.contentType;
   file.md5Hash = row.md5Hash;
 }
-
-const getDetails = sql(`
-  SELECT *
-  FROM gdrive_file_view
-  WHERE path = $path
-`);
 
 class File {
   static fromUrl (url, opts = {}) {
@@ -1118,13 +805,14 @@ function maybeAddSlash (str, addSlash) {
 }
 
 async function ls (url, opts) {
+  db.open();
   const { long, rescan, human, total } = opts;
   url = File.fromUrl(url, { resolve: true });
 
   const list = {
-    local: localList.all,
-    s3: s3List.all,
-    gdrive: gdriveList.all
+    local: db.getLocalFiles,
+    s3: db.getS3Files,
+    gdrive: db.getGdriveFiles
   }[url.type];
 
   if (rescan) await url.scan();
@@ -1158,28 +846,6 @@ const STORAGE = {
   GLACIER: 'G',
   DEEP_ARCHIVE: 'D'
 };
-
-const localList = sql(`
-  SELECT *
-  FROM local_file_view
-  WHERE path BETWEEN $path AND $path || '~'
-  ORDER BY path
-`);
-
-const s3List = sql(`
-  SELECT *
-  FROM s3_file_view
-  WHERE bucket = $bucket
-  AND   path BETWEEN $path AND $path || '~'
-  ORDER BY bucket, path
-`);
-
-const gdriveList = sql(`
-  SELECT *
-  FROM gdrive_file_view
-  WHERE path BETWEEN $path AND $path || '~'
-  ORDER BY path
-`);
 
 function speedo ({
   total,
@@ -1342,7 +1008,7 @@ async function upload (source, dest, opts) {
 
   dest.md5Hash = undefined; // force re-stat
   await dest.stat();
-  insertFile$1(dest);
+  db.insertS3Files([dest]);
 }
 
 function makeMetadata ({ mtime, size, md5Hash, contentType }) {
@@ -1408,7 +1074,7 @@ async function download$1 (source, dest, opts = {}) {
   const tm = new Date(mtime + 'Z');
   await utimes(dest.path, tm, tm);
 
-  insertFile$2({ ...dest, md5Hash, size, mtime });
+  db.insertLocalFiles([{ ...dest, md5Hash, size, mtime }]);
 }
 
 async function download (src, dst, opts = {}) {
@@ -1441,10 +1107,11 @@ async function download (src, dst, opts = {}) {
   await pipeline(...streams);
 
   if (mtime) await utimes(dst.path, mtime, mtime);
-  insertFile$2({ ...dst, size, mtime, md5Hash });
+  db.insertLocalFiles([{ ...dst, size, mtime, md5Hash }]);
 }
 
 async function cp (src, dst, opts = {}) {
+  db.open();
   src = File.fromUrl(src, { resolve: true });
   dst = File.fromUrl(dst, { resolve: true });
   const dir = getDirection(src, dst);
@@ -1477,7 +1144,7 @@ async function copy$1 (from, to, opts = {}) {
   log(log.blue(from.path));
   log(log.cyan(` -> ${to.path} copied`));
 
-  insertFile$2({ ...from, path: to.path });
+  db.insertLocalFiles([{ ...from, path: to.path }]);
 }
 
 async function remove$1 (file, opts) {
@@ -1497,7 +1164,7 @@ async function remove$1 (file, opts) {
     }
     dir = dirname(dir);
   }
-  removeFile$2(file);
+  db.deleteLocalFiles([file]);
   log(log.cyan(`${file.path} deleted`));
 }
 
@@ -1521,7 +1188,7 @@ async function copy (from, to, opts = {}) {
     .promise();
 
   await to.stat();
-  insertFile$1(to);
+  db.insertS3Files([to]);
 
   log(log.blue(from.url));
   log(log.cyan(` -> ${to.url} copied`));
@@ -1537,11 +1204,12 @@ async function remove (file, opts) {
 
   const s3 = getS3();
   await s3.deleteObject({ Bucket: file.bucket, Key: file.path }).promise();
-  removeFile$1(file);
+  db.deleteS3Files([file]);
   log(log.cyan(`${file.url} removed`));
 }
 
 async function sync (srcRoot, dstRoot, opts = {}) {
+  db.open();
   srcRoot = File.fromUrl(srcRoot, { resolve: true, directory: true });
   dstRoot = File.fromUrl(dstRoot, { resolve: true, directory: true });
   const fn = getFunctions(srcRoot, dstRoot);
@@ -1552,7 +1220,7 @@ async function sync (srcRoot, dstRoot, opts = {}) {
   const seen = new Set();
 
   // new files
-  for (const row of fn.newFiles(fn.paths)) {
+  for (const row of fn.newFiles()) {
     const src = File.like(srcRoot, row);
     const dst = src.rebase(srcRoot, dstRoot);
     await fn.copy(src, dst, { ...opts, progress: true });
@@ -1560,11 +1228,10 @@ async function sync (srcRoot, dstRoot, opts = {}) {
   }
 
   // simple renames
-  for (const { contentId } of fn.differences(fn.paths)) {
-    const d = { contentId, ...fn.paths };
-    const src = File.like(srcRoot, fn.srcContent.get(d));
+  for (const { contentId } of fn.differences()) {
+    const src = File.like(srcRoot, fn.srcContent(contentId)[0]);
     const dst = src.rebase(srcRoot, dstRoot);
-    const old = File.like(dstRoot, fn.dstContent.get(d));
+    const old = File.like(dstRoot, fn.dstContent(contentId)[0]);
     if (!old.archived) {
       await fn.destCopy(old, dst, opts);
     } else {
@@ -1574,10 +1241,9 @@ async function sync (srcRoot, dstRoot, opts = {}) {
   }
 
   // complex renames
-  for (const { contentId } of fn.duplicates()) {
-    const d = { contentId, ...fn.paths };
-    const srcs = fn.srcContent.all(d).map(row => File.like(srcRoot, row));
-    const dsts = fn.dstContent.all(d).map(row => File.like(dstRoot, row));
+  for (const contentId of fn.duplicates()) {
+    const srcs = fn.srcContent(contentId).map(row => File.like(srcRoot, row));
+    const dsts = fn.dstContent(contentId).map(row => File.like(dstRoot, row));
     for (const src of srcs) {
       const dst = src.rebase(srcRoot, dstRoot);
       if (!dsts.find(d => d.url === dst.url)) {
@@ -1604,7 +1270,7 @@ async function sync (srcRoot, dstRoot, opts = {}) {
 
   // deletes
   if (opts.delete) {
-    for (const row of fn.oldFiles(fn.paths)) {
+    for (const row of fn.oldFiles()) {
       const dst = File.like(dstRoot, row);
       if (!seen.has(dst.path)) {
         await fn.remove(dst, opts);
@@ -1623,37 +1289,34 @@ function getFunctions (src, dst) {
   };
   return {
     local_s3: {
-      paths,
-      newFiles: localNotS3.all,
-      oldFiles: s3NotLocal.all,
-      differences: localS3Diff.all,
-      duplicates: duplicates.all,
-      srcContent: localContent,
-      dstContent: s3Content,
+      newFiles: () => db.getLocalNotS3(paths),
+      oldFiles: () => db.getS3NotLocal(paths),
+      differences: () => db.getLocalS3Diffs(paths),
+      duplicates: () => db.getDuplicates(),
+      srcContent: contentId => db.getLocalContent({ ...paths, contentId }),
+      dstContent: contentId => db.getS3Content({ ...paths, contentId }),
       copy: upload,
       destCopy: copy,
       remove: remove
     },
     s3_local: {
-      paths,
-      newFiles: s3NotLocal.all,
-      oldFiles: localNotS3.all,
-      differences: localS3Diff.all,
-      duplicates: duplicates.all,
-      srcContent: s3Content,
-      dstContent: localContent,
+      newFiles: () => db.getS3NotLocal(paths),
+      oldFiles: () => db.getLocalNotS3(paths),
+      differences: () => db.getLocalS3Diffs(paths),
+      duplicates: () => db.getDuplicates(),
+      srcContent: contentId => db.getS3Content({ ...paths, contentId }),
+      dstContent: contentId => db.getLocalContent({ ...paths, contentId }),
       copy: download$1,
       destCopy: copy$1,
       remove: remove$1
     },
     gdrive_local: {
-      paths,
-      newFiles: gdriveNotLocal.all,
-      oldFiles: localNotGdrive.all,
-      differences: localGdriveDiff.all,
-      duplicates: duplicates.all,
-      srcContent: gdriveContent,
-      dstContent: localContent,
+      newFiles: () => db.getGdriveNotLocal(paths),
+      oldFiles: () => db.getLocalNotGdrive(paths),
+      differences: () => db.getLocalGdriveDiffs(paths),
+      duplicates: () => db.getDuplicates(),
+      srcContent: contentId => db.getGdriveContent({ ...paths, contentId }),
+      dstContent: contentId => db.getLocalContent({ ...paths, contentId }),
       copy: download,
       destCopy: copy$1,
       remove: remove$1
@@ -1661,89 +1324,8 @@ function getFunctions (src, dst) {
   }[dir]
 }
 
-const localNotS3 = sql(`
-  SELECT * FROM local_file_view
-  WHERE path BETWEEN $localPath AND $localPath || '~'
-  AND contentId NOT IN (
-    SELECT contentId
-    FROM s3_file
-    WHERE bucket = $s3Bucket
-    AND   path BETWEEN $s3Path AND $s3Path || '~'
-  )
-`);
-
-const s3NotLocal = sql(`
-  SELECT * FROM s3_file_view
-  WHERE bucket = $s3Bucket
-  AND   path BETWEEN $s3Path AND $s3Path || '~'
-  AND   contentId NOT IN (
-    SELECT contentId
-    FROM local_file
-    WHERE path BETWEEN $localPath AND $localPath || '~'
-  )
-`);
-
-const localNotGdrive = sql(`
-  SELECT * FROM local_file_view
-  WHERE path BETWEEN $localPath AND $localPath || '~'
-  AND contentId NOT IN (
-    SELECT contentId
-    FROM gdrive_file
-    WHERE path BETWEEN $gdrivePath AND $gdrivePath || '~'
-  )
-`);
-
-const gdriveNotLocal = sql(`
-  SELECT * FROM gdrive_file_view
-  WHERE path BETWEEN $gdrivePath AND $gdrivePath || '~'
-  AND contentId NOT IN (
-    SELECT contentId
-    FROM local_file
-    WHERE path BETWEEN $localPath AND $localPath || '~'
-  )
-`);
-
-const localS3Diff = sql(`
-  SELECT * FROM local_and_s3_view
-  WHERE localPath BETWEEN $localPath AND $localPath || '~'
-  AND   s3Bucket = $s3Bucket
-  AND   s3Path BETWEEN $s3Path AND $s3Path || '~'
-  AND   substr(localPath, 1 + length($localPath)) !=
-          substr(s3Path, 1 + length($s3Path))
-`);
-
-const localGdriveDiff = sql(`
-  SELECT * FROM local_and_gdrive_view
-  WHERE localPath BETWEEN $localPath AND $localPath || '~'
-  AND   gdrivePath BETWEEN $gdrivePath AND $gdrivePath || '~'
-  AND   substr(localPath, 1 + length($localPath)) !=
-          substr(gdrivePath, 1 + length($gdrivePath))
-`);
-
-const duplicates = sql(`
-  SELECT contentId FROM duplicates_view
-`);
-
-const localContent = sql(`
-  SELECT * FROM local_file_view
-  WHERE contentId = $contentId
-  AND   path BETWEEN $localPath AND $localPath || '~'
-`);
-
-const s3Content = sql(`
-  SELECT * FROM s3_file_view
-  WHERE contentId = $contentId
-  AND   bucket = $s3Bucket
-  AND   path BETWEEN $s3Path AND $s3Path || '~'
-`);
-
-const gdriveContent = sql(`
-  SELECT * FROM gdrive_file_view
-  WHERE contentId = $contentId
-  AND   path BETWEEN $gdrivePath AND $gdrivePath || '~'
-`);
-
 async function rm (file, opts = {}) {
+  db.open();
   file = File.fromUrl(file, { resolve: true });
   const fns = {
     local: remove$1,
@@ -1758,7 +1340,7 @@ async function rm (file, opts = {}) {
 }
 
 const prog = sade('s3cli');
-const version = '2.2.5';
+const version = '2.2.7';
 
 prog.version(version);
 

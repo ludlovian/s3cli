@@ -5,8 +5,10 @@ import s3upload from './s3/upload.mjs'
 import s3download from './s3/download.mjs'
 import gdriveDownload from './drive/download.mjs'
 import { getDirection } from './util.mjs'
+import db from './db.mjs'
 
 export default async function cp (src, dst, opts = {}) {
+  db.open()
   src = File.fromUrl(src, { resolve: true })
   dst = File.fromUrl(dst, { resolve: true })
   const dir = getDirection(src, dst)

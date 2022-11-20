@@ -3,7 +3,7 @@ import { dirname } from 'path'
 
 import log from 'logjs'
 
-import { insertFile } from './sql.mjs'
+import db from '../db.mjs'
 
 export default async function copy (from, to, opts = {}) {
   const { dryRun } = opts
@@ -21,5 +21,5 @@ export default async function copy (from, to, opts = {}) {
   log(log.blue(from.path))
   log(log.cyan(` -> ${to.path} copied`))
 
-  insertFile({ ...from, path: to.path })
+  db.insertLocalFiles([{ ...from, path: to.path }])
 }

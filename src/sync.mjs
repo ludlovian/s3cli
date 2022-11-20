@@ -1,4 +1,4 @@
-import { sql } from './db/index.mjs'
+import db from './db.mjs'
 import File from './lib/file.mjs'
 import { getDirection } from './util.mjs'
 import localCopy from './local/copy.mjs'
@@ -10,6 +10,7 @@ import s3remove from './s3/remove.mjs'
 import gdriveDownload from './drive/download.mjs'
 
 export default async function sync (srcRoot, dstRoot, opts = {}) {
+  db.open()
   srcRoot = File.fromUrl(srcRoot, { resolve: true, directory: true })
   dstRoot = File.fromUrl(dstRoot, { resolve: true, directory: true })
   const fn = getFunctions(srcRoot, dstRoot)
@@ -20,7 +21,7 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
   const seen = new Set()
 
   // new files
-  for (const row of fn.newFiles(fn.paths)) {
+  for (const row of fn.newFiles()) {
     const src = File.like(srcRoot, row)
     const dst = src.rebase(srcRoot, dstRoot)
     await fn.copy(src, dst, { ...opts, progress: true })
@@ -28,11 +29,10 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
   }
 
   // simple renames
-  for (const { contentId } of fn.differences(fn.paths)) {
-    const d = { contentId, ...fn.paths }
-    const src = File.like(srcRoot, fn.srcContent.get(d))
+  for (const { contentId } of fn.differences()) {
+    const src = File.like(srcRoot, fn.srcContent(contentId)[0])
     const dst = src.rebase(srcRoot, dstRoot)
-    const old = File.like(dstRoot, fn.dstContent.get(d))
+    const old = File.like(dstRoot, fn.dstContent(contentId)[0])
     if (!old.archived) {
       await fn.destCopy(old, dst, opts)
     } else {
@@ -42,10 +42,9 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
   }
 
   // complex renames
-  for (const { contentId } of fn.duplicates()) {
-    const d = { contentId, ...fn.paths }
-    const srcs = fn.srcContent.all(d).map(row => File.like(srcRoot, row))
-    const dsts = fn.dstContent.all(d).map(row => File.like(dstRoot, row))
+  for (const contentId of fn.duplicates()) {
+    const srcs = fn.srcContent(contentId).map(row => File.like(srcRoot, row))
+    const dsts = fn.dstContent(contentId).map(row => File.like(dstRoot, row))
     for (const src of srcs) {
       const dst = src.rebase(srcRoot, dstRoot)
       if (!dsts.find(d => d.url === dst.url)) {
@@ -72,7 +71,7 @@ export default async function sync (srcRoot, dstRoot, opts = {}) {
 
   // deletes
   if (opts.delete) {
-    for (const row of fn.oldFiles(fn.paths)) {
+    for (const row of fn.oldFiles()) {
       const dst = File.like(dstRoot, row)
       if (!seen.has(dst.path)) {
         await fn.remove(dst, opts)
@@ -91,122 +90,37 @@ function getFunctions (src, dst) {
   }
   return {
     local_s3: {
-      paths,
-      newFiles: localNotS3.all,
-      oldFiles: s3NotLocal.all,
-      differences: localS3Diff.all,
-      duplicates: duplicates.all,
-      srcContent: localContent,
-      dstContent: s3Content,
+      newFiles: () => db.getLocalNotS3(paths),
+      oldFiles: () => db.getS3NotLocal(paths),
+      differences: () => db.getLocalS3Diffs(paths),
+      duplicates: () => db.getDuplicates(),
+      srcContent: contentId => db.getLocalContent({ ...paths, contentId }),
+      dstContent: contentId => db.getS3Content({ ...paths, contentId }),
       copy: s3upload,
       destCopy: s3copy,
       remove: s3remove
     },
     s3_local: {
-      paths,
-      newFiles: s3NotLocal.all,
-      oldFiles: localNotS3.all,
-      differences: localS3Diff.all,
-      duplicates: duplicates.all,
-      srcContent: s3Content,
-      dstContent: localContent,
+      newFiles: () => db.getS3NotLocal(paths),
+      oldFiles: () => db.getLocalNotS3(paths),
+      differences: () => db.getLocalS3Diffs(paths),
+      duplicates: () => db.getDuplicates(),
+      srcContent: contentId => db.getS3Content({ ...paths, contentId }),
+      dstContent: contentId => db.getLocalContent({ ...paths, contentId }),
       copy: s3download,
       destCopy: localCopy,
       remove: localRemove
     },
     gdrive_local: {
-      paths,
-      newFiles: gdriveNotLocal.all,
-      oldFiles: localNotGdrive.all,
-      differences: localGdriveDiff.all,
-      duplicates: duplicates.all,
-      srcContent: gdriveContent,
-      dstContent: localContent,
+      newFiles: () => db.getGdriveNotLocal(paths),
+      oldFiles: () => db.getLocalNotGdrive(paths),
+      differences: () => db.getLocalGdriveDiffs(paths),
+      duplicates: () => db.getDuplicates(),
+      srcContent: contentId => db.getGdriveContent({ ...paths, contentId }),
+      dstContent: contentId => db.getLocalContent({ ...paths, contentId }),
       copy: gdriveDownload,
       destCopy: localCopy,
       remove: localRemove
     }
   }[dir]
 }
-
-const localNotS3 = sql(`
-  SELECT * FROM local_file_view
-  WHERE path BETWEEN $localPath AND $localPath || '~'
-  AND contentId NOT IN (
-    SELECT contentId
-    FROM s3_file
-    WHERE bucket = $s3Bucket
-    AND   path BETWEEN $s3Path AND $s3Path || '~'
-  )
-`)
-
-const s3NotLocal = sql(`
-  SELECT * FROM s3_file_view
-  WHERE bucket = $s3Bucket
-  AND   path BETWEEN $s3Path AND $s3Path || '~'
-  AND   contentId NOT IN (
-    SELECT contentId
-    FROM local_file
-    WHERE path BETWEEN $localPath AND $localPath || '~'
-  )
-`)
-
-const localNotGdrive = sql(`
-  SELECT * FROM local_file_view
-  WHERE path BETWEEN $localPath AND $localPath || '~'
-  AND contentId NOT IN (
-    SELECT contentId
-    FROM gdrive_file
-    WHERE path BETWEEN $gdrivePath AND $gdrivePath || '~'
-  )
-`)
-
-const gdriveNotLocal = sql(`
-  SELECT * FROM gdrive_file_view
-  WHERE path BETWEEN $gdrivePath AND $gdrivePath || '~'
-  AND contentId NOT IN (
-    SELECT contentId
-    FROM local_file
-    WHERE path BETWEEN $localPath AND $localPath || '~'
-  )
-`)
-
-const localS3Diff = sql(`
-  SELECT * FROM local_and_s3_view
-  WHERE localPath BETWEEN $localPath AND $localPath || '~'
-  AND   s3Bucket = $s3Bucket
-  AND   s3Path BETWEEN $s3Path AND $s3Path || '~'
-  AND   substr(localPath, 1 + length($localPath)) !=
-          substr(s3Path, 1 + length($s3Path))
-`)
-
-const localGdriveDiff = sql(`
-  SELECT * FROM local_and_gdrive_view
-  WHERE localPath BETWEEN $localPath AND $localPath || '~'
-  AND   gdrivePath BETWEEN $gdrivePath AND $gdrivePath || '~'
-  AND   substr(localPath, 1 + length($localPath)) !=
-          substr(gdrivePath, 1 + length($gdrivePath))
-`)
-
-const duplicates = sql(`
-  SELECT contentId FROM duplicates_view
-`)
-
-const localContent = sql(`
-  SELECT * FROM local_file_view
-  WHERE contentId = $contentId
-  AND   path BETWEEN $localPath AND $localPath || '~'
-`)
-
-const s3Content = sql(`
-  SELECT * FROM s3_file_view
-  WHERE contentId = $contentId
-  AND   bucket = $s3Bucket
-  AND   path BETWEEN $s3Path AND $s3Path || '~'
-`)
-
-const gdriveContent = sql(`
-  SELECT * FROM gdrive_file_view
-  WHERE contentId = $contentId
-  AND   path BETWEEN $gdrivePath AND $gdrivePath || '~'
-`)

@@ -1,25 +1,12 @@
 import driveAPI from './api.mjs'
-import { sql } from '../db/index.mjs'
-import { listFiles, insertFile, removeFile } from './sql.mjs'
+import db from '../db.mjs'
 
 export default async function * scan (root) {
   const File = root.constructor
   const drive = await driveAPI()
 
   let n = 0
-  const old = new Set(listFiles.all(root).map(r => r.path))
-  const insertFiles = sql.transaction(files => {
-    for (const file of files) {
-      insertFile(file)
-      old.delete(file.path)
-    }
-  })
-  const deleteOld = sql.transaction(paths => {
-    for (const path of paths) {
-      removeFile({ path })
-    }
-  })
-
+  const old = new Set(db.getGdriveFiles(root).map(r => r.path))
   const query = {
     fields:
       'nextPageToken,files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)'
@@ -48,16 +35,19 @@ export default async function * scan (root) {
       .filter(f => !f.isFolder && f.path.startsWith(root.path))
       .map(f => File.like(root, f))
 
-    insertFiles(found)
-    n += found.length
-    if (found.length) yield n
+    if (found.length) {
+      db.insertGdriveFiles(found)
+      found.forEach(f => old.delete(f.path))
+      n += found.length
+      yield n
+    }
 
     if (!data.nextPageToken) break
     query.pageToken = data.nextPageToken
     pResponse = drive.files.list(query)
   }
 
-  deleteOld([...old])
+  db.deleteGdriveFiles([...old].map(path => ({ path })))
 }
 
 const folders = {}

@@ -11,7 +11,7 @@ import log from 'logjs'
 
 import getDriveAPI from './api.mjs'
 import { onProgress } from '../s3/util.mjs'
-import { insertFile } from '../local/sql.mjs'
+import db from '../db.mjs'
 
 export default async function download (src, dst, opts = {}) {
   const { size, mtime, md5Hash, googleId } = src
@@ -43,5 +43,5 @@ export default async function download (src, dst, opts = {}) {
   await pipeline(...streams)
 
   if (mtime) await utimes(dst.path, mtime, mtime)
-  insertFile({ ...dst, size, mtime, md5Hash })
+  db.insertLocalFiles([{ ...dst, size, mtime, md5Hash }])
 }

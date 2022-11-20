@@ -1,8 +1,10 @@
 import File from './lib/file.mjs'
 import s3remove from './s3/remove.mjs'
 import localRemove from './local/remove.mjs'
+import db from './db.mjs'
 
 export default async function rm (file, opts = {}) {
+  db.open()
   file = File.fromUrl(file, { resolve: true })
   const fns = {
     local: localRemove,

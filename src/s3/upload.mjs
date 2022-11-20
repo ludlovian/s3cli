@@ -9,7 +9,7 @@ import progressStream from 'progress-stream/gen'
 import log from 'logjs'
 
 import { getS3, onProgress } from './util.mjs'
-import { insertFile } from './sql.mjs'
+import db from '../db.mjs'
 
 export default async function upload (source, dest, opts) {
   const { path, size, contentType, md5Hash } = source
@@ -60,7 +60,7 @@ export default async function upload (source, dest, opts) {
 
   dest.md5Hash = undefined // force re-stat
   await dest.stat()
-  insertFile(dest)
+  db.insertS3Files([dest])
 }
 
 function makeMetadata ({ mtime, size, md5Hash, contentType }) {

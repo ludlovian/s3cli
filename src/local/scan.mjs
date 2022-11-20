@@ -1,33 +1,21 @@
 import { readdir } from 'fs/promises'
 import { join } from 'path'
 
-import { sql } from '../db/index.mjs'
-import { listFiles, insertFile, removeFile } from './sql.mjs'
+import db from '../db.mjs'
 
 export default async function * scan (root) {
   const File = root.constructor
 
   let n = 0
-  const old = new Set(listFiles.pluck().all(root))
-
-  const insertFiles = sql.transaction(files => {
-    for (const file of files) {
-      insertFile(file)
-      old.delete(file.path)
-    }
-  })
-  const deleteOld = sql.transaction(paths => {
-    for (const path of paths) {
-      removeFile({ path })
-    }
-  })
+  const old = new Set(db.getLocalFiles(root).map(f => f.path))
 
   for await (const files of scanDir(root.path, File)) {
     n += files.length
-    insertFiles(files)
+    db.insertLocalFiles(files)
+    files.forEach(f => old.delete(f.path))
     yield n
   }
-  deleteOld([...old])
+  db.deleteLocalFiles([...old].map(path => ({ path })))
 }
 
 async function * scanDir (dir, File) {

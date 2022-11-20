@@ -1,7 +1,7 @@
 import log from 'logjs'
 
 import { getS3 } from './util.mjs'
-import { insertFile } from './sql.mjs'
+import db from '../db.mjs'
 
 export default async function copy (from, to, opts = {}) {
   const { dryRun } = opts
@@ -23,7 +23,7 @@ export default async function copy (from, to, opts = {}) {
     .promise()
 
   await to.stat()
-  insertFile(to)
+  db.insertS3Files([to])
 
   log(log.blue(from.url))
   log(log.cyan(` -> ${to.url} copied`))
