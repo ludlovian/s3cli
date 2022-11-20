@@ -6,7 +6,7 @@
     "test": "c8 uvu",
     "format": "prettier-standard '{src,test}/**/*.mjs'",
     "lint": "standard '{src,test}/**/*.mjs' | snazzy",
-    "build": "rollup -c rollup.config.js",
+    "build": "rollup -c rollup.config.mjs",
     "postbuild": "chmod +x dist/s3cli.mjs",
     "version": "npm run build"
   },
