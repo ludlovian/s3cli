@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@googleapis/drive": "^4.0.0",
-    "aws-sdk": "^2.1258.0",
+    "aws-sdk": "^2.1354.0",
     "better-sqlite3": "^7.6.2",
     "mime": "^3.0.0",
     "sade": "^1.8.1"
